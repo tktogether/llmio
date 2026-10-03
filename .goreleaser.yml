@@ -11,3 +11,6 @@ builds:
     ldflags:
       - -s -w
       - -X github.com/atopos31/llmio/consts.Version={{ .Tag }}
+
+release:
+  replace_existing_artifacts: true
