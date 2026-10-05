@@ -3,6 +3,7 @@ import { Suspense, lazy } from 'react';
 import { ThemeProvider } from "@/components/theme-provider"
 import Loading from "@/components/loading"
 import { Toaster } from './components/ui/sonner';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 
 // 懒加载路由组件
 const Layout = lazy(() => import('./routes/layout'));
@@ -59,6 +60,7 @@ function App() {
         </Suspense>
       </Router>
       <Toaster richColors position='top-center' />
+      <SpeedInsights />
     </ThemeProvider>
   );
 }
