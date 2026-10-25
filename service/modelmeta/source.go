@@ -5,8 +5,12 @@
 // docs/model-capability-autofill-plan.md §1.1：原生接口的字段名互不相同，
 // 而使用最广的 OpenAI GET /v1/models 只返回 id/object/created/owned_by。
 //
-// 这个包**只读**：它产出的建议由前端预填进表单，保存路径完全沿用既有的
-// Create/UpdateModelProvider，不做任何服务端补值（§4.2）。
+// 这个包**只读**：它产出的建议由前端预填进表单。保存路径的服务端补值只有
+// 一处例外——批量创建/补填端点按**三态语义**只补请求里显式留空（null）的
+// 六个元数据位，显式值（含显式 false / 0）一律不动；单条 Create/Update
+// 仍是一个字段都不补（§4.2，由 handler/modelmeta_writepath_test.go 钉着）。
+// 批量路径只认策略的 Enabled / Sources，Overwrite 在那里恒无效——批量请求
+// 里没有"用户改过哪些格"的信息，Overwrite 没有可作用的语义。
 package modelmeta
 
 import (
