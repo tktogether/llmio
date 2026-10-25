@@ -71,18 +71,24 @@ def case_s1(stub, oc, text):
     mid = setup_model(alias, breaker=False)
     pms = [f"{alias}-{i:02d}-boom" for i in range(PRIMARY_N)]
     link_batch(mid, oc, pms)
+    # 活备用必须真的挂上：不挂的话"备用没接管"是空真——池里根本没有备用
+    link_batch(mid, oc, [f"{alias}-text"], backup=True)
 
     status, raw = rm.chat("openai", rm.CLIENT_PATH["openai"],
                           dict(text, model=alias), rm.client_headers("openai"))
     rm.need(status != 200, "熔断关时这一发不该成功（备用接管前提被打破）")
-    rm.need("All retry failed" in raw, f"应以重试耗尽收尾：{raw[:200]}")
+    rm.need("All retry failed" in raw, f"应以重试耗尾：{raw[:200]}")
     # 多打几发，确认不是运气
     for _ in range(3):
         rm.chat("openai", rm.CLIENT_PATH["openai"],
                 dict(text, model=alias), rm.client_headers("openai"))
     backups = sum(hit_count(stub, f"{alias}-{i:02d}-boom") for i in range(PRIMARY_N))
     rm.need(backups > 0, "死主关联确实被反复打过")
-    rm.need(True, f"S1 实测：{PRIMARY_N} 条死主关联、max_retry=3、熔断关——备用从未接管（预期行为）")
+    backup_hits = hit_count(stub, f"{alias}-text")
+    rm.need(backup_hits == 0,
+            f"熔断关、N={PRIMARY_N}≫max_retry 时备用一次都不该被碰，实得 {backup_hits} 发——"
+            f"这正是批量把 N 推大后 backup 接管前提被静默打破的形态")
+    rm.need(True, f"S1 实测：{PRIMARY_N} 条死主关联、max_retry=3、熔断关——备用零请求（预期行为）")
 
 
 def case_s2(stub, oc, text):
