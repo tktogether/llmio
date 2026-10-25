@@ -23,7 +23,8 @@ import {
   type BatchCreateResult,
   type BatchModelsResult,
 } from "@/lib/api";
-import type { Model, Provider, ProviderModel } from "@/lib/api";
+import type { Model, ModelWithProvider, Provider, ProviderModel } from "@/lib/api";
+import { getModelProviders } from "@/lib/api";
 
 /**
  * 「从供应商导入」向导（方案 §4.2.2）。
@@ -156,6 +157,41 @@ export function ImportWizard({
       cancelled = true;
     };
   }, [step, attachExisting, classification.toAttach, modelByName, providerId]);
+
+  // 熔断建议（方案 §4.2.2-5）：批量把主关联数推到 MaxRetry 之上后，backup 的
+  // 接管前提（请求内主池清空）会被静默破坏——除非模型开了熔断（熔断 Open 的
+  // 关联立即出池，主池才可能被清空）。挂到已有模型前检查一遍，把这笔账说在
+  // 下单前；不改默认值，只给建议与解释。
+  const [breakerAdvice, setBreakerAdvice] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (step !== 2 || !attachExisting || classification.toAttach.length === 0) {
+      setBreakerAdvice(null);
+      return;
+    }
+    let cancelled = false;
+    Promise.all(
+      classification.toAttach
+        .map((pm) => modelByName.get(pm))
+        .filter((m): m is Model => !!m)
+        .map(async (m) => {
+          const assocs = await getModelProviders(m.ID).catch(() => [] as ModelWithProvider[]);
+          const primary = assocs.filter((a) => !a.Backup && (a.Status ?? false));
+          // 本次导入将新增的主关联也算进去：挂完之后才是真实的池规模
+          const willAdd = attachPreview
+            ? attachPreview.created.filter((c) => c.ModelID === m.ID && !c.Backup).length
+            : 0;
+          const total = primary.length + willAdd;
+          return total > m.MaxRetry && !m.Breaker
+            ? t("import_wizard.breaker_advice_item", { name: m.Name, count: total, maxRetry: m.MaxRetry })
+            : null;
+        }),
+    ).then((items) => {
+      if (!cancelled) setBreakerAdvice(items.filter((x): x is string => !!x));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [step, attachExisting, classification.toAttach, modelByName, attachPreview, t]);
 
   /** 元数据源就绪探测：差异页进来看一眼，未就绪就把话说在导入之前 */
   useEffect(() => {
@@ -450,7 +486,11 @@ export function ImportWizard({
                   {t("import_wizard.diff_create", { count: classification.toCreate.length })}
                 </p>
                 <p className="text-xs">
-                  {t("import_wizard.diff_attach", { count: classification.toAttach.length })}
+                  {/* 计数随 attachExisting 收缩：摘要说的是"这次将发生什么"，
+                      取消挂载后还按候选全集报数就与下方清单自相矛盾 */}
+                  {t("import_wizard.diff_attach", {
+                    count: attachExisting ? classification.toAttach.length : 0,
+                  })}
                 </p>
                 {classification.toCreate.length > 0 && (
                   <p className="text-[11px] text-status-critical-ink">
@@ -463,6 +503,15 @@ export function ImportWizard({
                   </p>
                 )}
                 {probingCatalog && <p className="text-[11px] text-muted-foreground">{t("import_wizard.catalog_probing")}</p>}
+                {breakerAdvice && breakerAdvice.length > 0 && (
+                  <div className="text-[11px] text-status-critical-ink space-y-0.5">
+                    <p>{t("import_wizard.breaker_advice_title")}</p>
+                    {breakerAdvice.map((line) => (
+                      <p key={line} className="pl-2 font-mono">{line}</p>
+                    ))}
+                    <p className="text-muted-foreground">{t("import_wizard.breaker_advice_hint")}</p>
+                  </div>
+                )}
               </div>
 
               <div className="max-h-40 overflow-y-auto rounded-md border">

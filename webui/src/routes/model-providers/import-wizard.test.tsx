@@ -8,6 +8,7 @@ import {
   batchCreateModelProviders,
   batchCreateModels,
   getModelMetadata,
+  getModelProviders,
   getProviderModels,
   type Model,
   type Provider,
@@ -19,6 +20,7 @@ vi.mock("@/lib/api", () => ({
   batchCreateModelProviders: vi.fn(),
   batchCreateModels: vi.fn(),
   getModelMetadata: vi.fn(),
+  getModelProviders: vi.fn(),
   getProviderModels: vi.fn(),
 }))
 
@@ -26,6 +28,7 @@ const mocked = {
   batchCreateModelProviders: vi.mocked(batchCreateModelProviders),
   batchCreateModels: vi.mocked(batchCreateModels),
   getModelMetadata: vi.mocked(getModelMetadata),
+  getModelProviders: vi.mocked(getModelProviders),
   getProviderModels: vi.mocked(getProviderModels),
 }
 
@@ -76,6 +79,8 @@ beforeEach(async () => {
     tool_call: null, structured_output: null, image: null,
     input_price: null, cache_read_price: null, output_price: null,
   })
+  // 熔断建议会拉挂载目标的既有关联；默认空（多数用例不关心这路 IO）
+  mocked.getModelProviders.mockResolvedValue([])
   const i18n = (await import("@/i18n")).default
   await i18n.changeLanguage("zh-CN")
 })
@@ -187,5 +192,80 @@ describe("从供应商导入 · attach 开关", () => {
       expect(realCalls).toEqual([])
     })
     expect(await screen.findByText("导入结果")).toBeInTheDocument()
+  })
+
+  it("取消 attach 后摘要计数跟着归零，不再与下方清单矛盾", async () => {
+    const user = userEvent.setup()
+    mocked.getProviderModels.mockResolvedValue([pm("gpt-test")])
+    mocked.batchCreateModelProviders.mockResolvedValue({
+      dry_run: true, created: [], skipped: [], failed: [], unfilled: [],
+    })
+    await openWizard(user)
+
+    await user.click(await screen.findByRole("checkbox", { name: /gpt-test/ }))
+    await user.click(screen.getByRole("button", { name: "下一步" }))
+
+    expect(await screen.findByText(/将挂到已有同名逻辑模型：1 个/)).toBeInTheDocument()
+    await user.click(screen.getByRole("checkbox", { name: /挂关联/ }))
+    expect(screen.getByText(/将挂到已有同名逻辑模型：0 个/)).toBeInTheDocument()
+  })
+})
+
+describe("从供应商导入 · 熔断建议", () => {
+  function assoc(over: Partial<{ ID: number; Backup: boolean | null; Status: boolean | null }>) {
+    return {
+      ID: 101, ModelID: 1, ProviderModel: "gpt-test", ProviderID: 11,
+      ToolCall: true, StructuredOutput: false, Image: false, WithHeader: false,
+      CustomerHeaders: {}, ExtraBody: null, Status: true, Weight: 1,
+      InputPrice: 0, CacheReadPrice: 0, OutputPrice: 0, Currency: "CNY", Peak: null,
+      ...over,
+    }
+  }
+
+  it("主关联数 > MaxRetry 且未开熔断时，差异页给出开熔断建议", async () => {
+    const user = userEvent.setup()
+    // gpt-test: MaxRetry=3, Breaker=false（model() 基线），已有 3 条启用主关联；
+    // 本次导入将再挂 1 条（dry_run 预查返回它）→ 4 > 3，触发建议
+    mocked.getProviderModels.mockResolvedValue([pm("gpt-test")])
+    mocked.getModelProviders.mockResolvedValue([
+      assoc({ ID: 101 }), assoc({ ID: 102 }), assoc({ ID: 103 }),
+    ])
+    mocked.batchCreateModelProviders.mockResolvedValue({
+      dry_run: true,
+      created: [{
+        ID: 0, ModelID: 1, ProviderModel: "gpt-test", ProviderID: 11,
+        ToolCall: false, StructuredOutput: false, Image: false, WithHeader: false,
+        CustomerHeaders: {}, ExtraBody: null, Status: true, Weight: 1,
+        InputPrice: 0, CacheReadPrice: 0, OutputPrice: 0, Currency: "CNY", Peak: null,
+      }],
+      skipped: [], failed: [], unfilled: [],
+    })
+    await openWizard(user)
+
+    await user.click(await screen.findByRole("checkbox", { name: /gpt-test/ }))
+    await user.click(screen.getByRole("button", { name: "下一步" }))
+
+    expect(await screen.findByText(/主关联数将超过重试次数限制/)).toBeInTheDocument()
+    expect(screen.getByText(/gpt-test：主关联 4 条 > 重试 3 次/)).toBeInTheDocument()
+    expect(screen.getByText(/备用关联永远不会接管/)).toBeInTheDocument()
+  })
+
+  it("主关联数未超限时不打扰；开了熔断也不打扰", async () => {
+    const user = userEvent.setup()
+    // 2 条已有 + 1 条将挂 = 3，不大于 MaxRetry=3
+    mocked.getProviderModels.mockResolvedValue([pm("gpt-test")])
+    mocked.getModelProviders.mockResolvedValue([assoc({ ID: 101 }), assoc({ ID: 102 })])
+    mocked.batchCreateModelProviders.mockResolvedValue({
+      dry_run: true, created: [], skipped: [], failed: [], unfilled: [],
+    })
+    await openWizard(user)
+
+    await user.click(await screen.findByRole("checkbox", { name: /gpt-test/ }))
+    await user.click(screen.getByRole("button", { name: "下一步" }))
+
+    // 等差异页稳定后确认没有建议
+    await screen.findByText(/将挂到已有同名逻辑模型：1 个/)
+    await waitFor(() => expect(mocked.getModelProviders).toHaveBeenCalled())
+    expect(screen.queryByText(/主关联数将超过重试次数限制/)).not.toBeInTheDocument()
   })
 })
