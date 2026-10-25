@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -84,6 +84,8 @@ export function ImportWizard({
   const [executing, setExecuting] = useState(false);
   const [stepAResult, setStepAResult] = useState<BatchModelsResult | null>(null);
   const [stepBResult, setStepBResult] = useState<BatchCreateResult | null>(null);
+  /** 提交成功后已即时通知页面刷新（notifyRefresh 置位）；关闭时跳过兜底补拉 */
+  const refreshedRef = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -98,6 +100,7 @@ export function ImportWizard({
     setCatalogWarning(false);
     setStepAResult(null);
     setStepBResult(null);
+    refreshedRef.current = false;
   }, [open]);
 
   useEffect(() => {
@@ -293,11 +296,20 @@ export function ImportWizard({
       }
       setStepBResult(bResult);
       setStep(3);
+      // 两步都已落库就立刻刷新页面数据：新建的逻辑模型与关联不该等关掉
+      // 向导才出现在总览里。onCompleted 无参（页面整表重拉）。
+      notifyRefresh();
     } catch (err) {
       toast.error(t("import_wizard.exec_failed", { message: err instanceof Error ? err.message : String(err) }));
     } finally {
       setExecuting(false);
     }
+  };
+
+  /** 提交成功后的即时页面刷新。幂等：重试成功后再调一次，代价是重复拉取 */
+  const notifyRefresh = () => {
+    refreshedRef.current = true;
+    void onCompleted();
   };
 
   const retryAssociations = async () => {
@@ -332,6 +344,7 @@ export function ImportWizard({
           ).values(),
         ],
       });
+      notifyRefresh();
     } catch (err) {
       toast.error(t("import_wizard.exec_failed", { message: err instanceof Error ? err.message : String(err) }));
     } finally {
@@ -340,14 +353,16 @@ export function ImportWizard({
   };
 
   const handleClose = async () => {
-    // attach-only 的导入没有新建模型，但关联数变了——只要第二步真的动过
-    // 行就通知页面重拉，否则总览卡片的关联计数停留在旧值。
-    const touched =
-      (stepAResult?.created.length ?? 0) > 0 ||
-      (stepBResult?.created.length ?? 0) > 0 ||
-      (stepBResult?.skipped.length ?? 0) > 0;
-    if (touched) {
-      await onCompleted();
+    // 提交成功时已即时刷新（notifyRefresh）；这里只在"有改动但还没通知过"
+    // 的兜底场景（如提交后的失败重试全被取消）补拉一次
+    if (!refreshedRef.current) {
+      const touched =
+        (stepAResult?.created.length ?? 0) > 0 ||
+        (stepBResult?.created.length ?? 0) > 0 ||
+        (stepBResult?.skipped.length ?? 0) > 0;
+      if (touched) {
+        await onCompleted();
+      }
     }
     onOpenChange(false);
   };

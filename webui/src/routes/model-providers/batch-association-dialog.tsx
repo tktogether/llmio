@@ -19,6 +19,7 @@ import { Search, X } from "lucide-react";
 import {
   batchCreateModelProviders,
   type BatchCreateResult,
+  type BatchCreatedItem,
   type BatchModelProviderRequest,
 } from "@/lib/api";
 import type { Model, Provider, ProviderModel } from "@/lib/api";
@@ -101,6 +102,9 @@ export function BatchAssociationDialog({
   const pendingRef = useRef<BatchModelProviderRequest | null>(null);
   /** 最近一次**真实提交**的请求体：重试从它过滤，不吃表单后续编辑 */
   const lastSubmitRef = useRef<BatchModelProviderRequest | null>(null);
+  /** 提交成功后已即时通知页面刷新：结果面板在场时数据就已是最新的，
+   *  关闭时的兜底通知跳过，避免同一批数据拉两遍。 */
+  const refreshedRef = useRef(false);
 
   // 打开时重置；锁定模型时默认选中它
   useEffect(() => {
@@ -114,6 +118,7 @@ export function BatchAssociationDialog({
     setResult(null);
     pendingRef.current = null;
     lastSubmitRef.current = null;
+    refreshedRef.current = false;
     setPmSearch("");
     setModelSearch("");
     setManualName("");
@@ -239,8 +244,16 @@ export function BatchAssociationDialog({
       // 重试的基底是"这次真正提交了什么"，不是表单当前的样子——结果面板
       // 在场时表单仍可编辑，现场重建会带着与首批不一致的配置落库。
       lastSubmitRef.current = req;
+      // 关联已落库就立刻刷新页面数据：用户停在结果面板时总览计数与关联
+      // 列表就该是最新的，不该等关掉弹窗才发现数字没动。
+      notifyRefresh(res.created);
     }
     return res;
+  };
+
+  const notifyRefresh = (created: BatchCreatedItem[]) => {
+    refreshedRef.current = true;
+    void onCompleted([...new Set([...created.map((c) => c.ModelID), ...effectiveModelIds])]);
   };
 
   const handlePreview = async () => {
@@ -300,6 +313,8 @@ export function BatchAssociationDialog({
         ],
       });
       lastSubmitRef.current = req;
+      // 重试新增的行同样即时上报（幂等刷新，代价是几次重复拉取）
+      notifyRefresh([...result.created, ...retried.created]);
     } catch (err) {
       toast.error(t("batch_association.submit_failed", { message: err instanceof Error ? err.message : String(err) }));
     } finally {
@@ -308,7 +323,9 @@ export function BatchAssociationDialog({
   };
 
   const handleClose = () => {
-    if (result && (result.created.length > 0 || result.skipped.length > 0)) {
+    // 提交时已即时刷新过的不再补拉；仅"有改动但还没通知过"（理论不可达，
+    // 留作兜底）才在关闭时刷新
+    if (result && !refreshedRef.current && (result.created.length > 0 || result.skipped.length > 0)) {
       onCompleted([...new Set([...result.created.map((c) => c.ModelID), ...effectiveModelIds])]);
     }
     onOpenChange(false);

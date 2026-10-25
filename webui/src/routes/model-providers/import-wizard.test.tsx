@@ -44,7 +44,7 @@ function pm(id: string): ProviderModel {
   return { id, object: "model", created: 0, owned_by: "" }
 }
 
-function Harness({ models }: { models: Model[] }) {
+function Harness({ models, onCompleted }: { models: Model[]; onCompleted?: () => void | Promise<void> }) {
   const [map, setMap] = useState<Record<number, ProviderModel[]>>({})
   const loadProviderModels = vi.fn(async (id: number) => {
     const data = await getProviderModels(id)
@@ -59,13 +59,13 @@ function Harness({ models }: { models: Model[] }) {
       providerModelsMap={map}
       providerModelsLoading={{}}
       loadProviderModels={loadProviderModels}
-      onCompleted={vi.fn()}
+      onCompleted={onCompleted ?? vi.fn()}
     />
   )
 }
 
-async function openWizard(user: ReturnType<typeof userEvent.setup>) {
-  render(<Harness models={[model({ ID: 1, Name: "gpt-test" })]} />)
+async function openWizard(user: ReturnType<typeof userEvent.setup>, onCompleted?: () => void | Promise<void>) {
+  render(<Harness models={[model({ ID: 1, Name: "gpt-test" })]} onCompleted={onCompleted} />)
   await screen.findByRole("dialog")
   await user.click(screen.getAllByRole("combobox")[0])
   await user.click(await screen.findByRole("option", { name: "十一号上游" }))
@@ -267,5 +267,31 @@ describe("从供应商导入 · 熔断建议", () => {
     await screen.findByText(/将挂到已有同名逻辑模型：1 个/)
     await waitFor(() => expect(mocked.getModelProviders).toHaveBeenCalled())
     expect(screen.queryByText(/主关联数将超过重试次数限制/)).not.toBeInTheDocument()
+  })
+})
+
+describe("从供应商导入 · 即时刷新", () => {
+  it("导入落地后立即通知页面刷新，不等向导关闭", async () => {
+    const user = userEvent.setup()
+    const onCompleted = vi.fn()
+    // gpt-test 已存在 → attach-only：第一步不发，第二步直接落关联
+    mocked.getProviderModels.mockResolvedValue([pm("gpt-test")])
+    mocked.batchCreateModelProviders.mockImplementation(async (req: unknown) => {
+      const r = req as { dry_run?: boolean }
+      if (r.dry_run) return { dry_run: true, created: [], skipped: [], failed: [], unfilled: [] }
+      return {
+        dry_run: false,
+        created: [{ ID: 88, ModelID: 1, ProviderModel: "gpt-test", Weight: 1, Currency: "CNY" } as never],
+        skipped: [], failed: [], unfilled: [],
+      }
+    })
+    await openWizard(user, onCompleted)
+
+    await user.click(await screen.findByRole("checkbox", { name: /gpt-test/ }))
+    await user.click(screen.getByRole("button", { name: "下一步" }))
+    await user.click(await screen.findByRole("button", { name: /导入 1 个/ }))
+
+    expect(await screen.findByText(/新建 1 条/)).toBeInTheDocument()
+    expect(onCompleted).toHaveBeenCalled()
   })
 })

@@ -32,7 +32,7 @@ function pm(id: string): ProviderModel {
 
 /** 模拟页面对弹窗的数据供给：loadProviderModels 真调 api 并回填 map——
  *  弹窗的列表完全来自 props，静态 map 测不出"选供应商后列表出现"。 */
-function Harness({ lockedModelId = null }: { lockedModelId?: number | null }) {
+function Harness({ lockedModelId = null, onCompleted }: { lockedModelId?: number | null; onCompleted?: (ids: number[]) => void | Promise<void> }) {
   const [map, setMap] = useState<Record<number, ProviderModel[]>>({})
   const loadProviderModels = vi.fn(async (id: number) => {
     const data = await getProviderModels(id)
@@ -48,13 +48,13 @@ function Harness({ lockedModelId = null }: { lockedModelId?: number | null }) {
       providerModelsLoading={{}}
       loadProviderModels={loadProviderModels}
       lockedModelId={lockedModelId}
-      onCompleted={vi.fn()}
+      onCompleted={onCompleted ?? vi.fn()}
     />
   )
 }
 
-async function openDialog(user: ReturnType<typeof userEvent.setup>) {
-  render(<Harness />)
+async function openDialog(user: ReturnType<typeof userEvent.setup>, onCompleted?: (ids: number[]) => void | Promise<void>) {
+  render(<Harness onCompleted={onCompleted} />)
   await screen.findByRole("dialog")
   // 选供应商 → 触发一次列表加载。弹窗里有多个 combobox（供应商/币种/三能力），
   // 供应商那个在 DOM 最前。
@@ -132,6 +132,40 @@ describe("批量关联弹窗 · 同名挂载", () => {
     expect(await screen.findByText(/元数据补全（models.dev）/)).toBeInTheDocument()
     expect(screen.getByText(/已存在且处于停用状态/)).toBeInTheDocument()
     expect(screen.getByText(/数据源没有该模型/)).toBeInTheDocument()
+  })
+
+  it("确认写入成功后立即通知页面刷新，不等弹窗关闭", async () => {
+    const user = userEvent.setup()
+    const onCompleted = vi.fn()
+    mocked.getProviderModels.mockResolvedValue([pm("gpt-test")])
+    await openDialog(user, onCompleted)
+    await user.click(await screen.findByRole("checkbox", { name: /gpt-test/ }))
+
+    mocked.batchCreate.mockResolvedValueOnce({
+      dry_run: true,
+      created: [
+        { ID: 0, ModelID: 1, ProviderModel: "gpt-test", Weight: 1, Currency: "CNY" } as never,
+      ],
+      skipped: [], failed: [], unfilled: [],
+    })
+    await user.click(screen.getByRole("button", { name: "预览" }))
+    expect(await screen.findByText(/将新建 1 条/)).toBeInTheDocument()
+    // 预览（dry_run）不是写入，不该惊动页面
+    expect(onCompleted).not.toHaveBeenCalled()
+
+    mocked.batchCreate.mockResolvedValueOnce({
+      dry_run: false,
+      created: [
+        { ID: 77, ModelID: 1, ProviderModel: "gpt-test", Weight: 1, Currency: "CNY" } as never,
+      ],
+      skipped: [], failed: [], unfilled: [],
+    })
+    await user.click(screen.getByRole("button", { name: /创建 1 条/ }))
+
+    // 结果面板一出现，刷新就已发生——用户停在结果面板时页面数据是最新的
+    expect(await screen.findByText(/新建 1 条/)).toBeInTheDocument()
+    expect(onCompleted).toHaveBeenCalledTimes(1)
+    expect(onCompleted).toHaveBeenCalledWith([1])
   })
 })
 
