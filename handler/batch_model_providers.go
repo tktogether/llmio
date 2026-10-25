@@ -399,6 +399,10 @@ func prepareSuggestions(ctx context.Context, provider models.Provider, pms []str
 
 	manager := modelMetaManager()
 	results := make([]modelmeta.Suggestion, len(pms))
+	// done 记"这条查询真的跑完了"：预算耗尽后没跑成的条目才归
+	// autofill_budget_exhausted，跑完了的照实报数据源给出的原因——把后者
+	// 也吞掉的话，"源里没有"会被说成"稍后再试"，两者对用户是两件事。
+	done := make([]bool, len(pms))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, batchAutofillConcurrency)
 	for i, pm := range pms {
@@ -417,6 +421,7 @@ func prepareSuggestions(ctx context.Context, provider models.Provider, pms []str
 				ProviderName:   provider.Name,
 				ProviderModel:  pm,
 			}, policy)
+			done[i] = true
 		}(i, pm)
 	}
 	wg.Wait()
@@ -425,9 +430,8 @@ func prepareSuggestions(ctx context.Context, provider models.Provider, pms []str
 	var unfilled []BatchUnfilledItem
 	for i, pm := range pms {
 		sug := results[i]
-		if suggestCtx.Err() != nil && !sug.Matched {
-			// 预算耗尽后没跑成的条目：稍后重试或走补填端点，别让它
-			// 顶着数据源的原因码说谎。
+		if !done[i] {
+			// 没跑成（预算耗尽/没抢到信号量）：稍后重试或走补填端点
 			unfilled = append(unfilled, BatchUnfilledItem{pm, reasonAutofillBudget})
 			continue
 		}
@@ -561,9 +565,16 @@ type BatchMutationResponse struct {
 	NotFound []uint `json:"not_found"`
 }
 
+// batchMutationIDsLimit 是启停/删除/补填的 ids 上限。SQLite 绑定参数上限
+// 32766，超了直接驱动层报错（500）；全选大列表的场景在这里就按住。
+const batchMutationIDsLimit = 1000
+
 func validateBatchIDs(ids []uint) string {
 	if len(ids) == 0 {
 		return "ids cannot be empty"
+	}
+	if len(ids) > batchMutationIDsLimit {
+		return "ids exceeds limit (1000)"
 	}
 	seen := make(map[uint]struct{}, len(ids))
 	for _, id := range ids {

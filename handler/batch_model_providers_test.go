@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -598,5 +599,77 @@ func TestBatchCreatePairsMode(t *testing.T) {
 	})
 	if code != http.StatusBadRequest {
 		t.Fatalf("重复配对应 400，实得 %d", code)
+	}
+}
+
+// TestBatchCreateConcurrentDuplicateClassified：并发同批请求撞唯一索引时，
+// 赢家建行、输家报 exists——skip_existing=false 下输家必须是 failed 而不是
+// 被静默吞成 skipped。库里最终恰好一行（索引底座 + 分类语义一起钉）。
+func TestBatchCreateConcurrentDuplicateClassified(t *testing.T) {
+	setupBatchDB(t)
+
+	const racers = 4
+	type outcome struct {
+		code    int
+		created int
+		failed  []BatchFailedItem
+		skipped []BatchSkippedItem
+	}
+	outcomes := make([]outcome, racers)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range racers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			w := doJSON(t, BatchCreateModelProviders, http.MethodPost, "/api/model-providers/batch", map[string]any{
+				"model_ids":       []uint{1},
+				"provider_id":     1,
+				"provider_models": []string{"race-a"},
+				"defaults":        map[string]any{"weight": 1},
+				"skip_existing":   false,
+			}, nil)
+			var env struct {
+				Code int             `json:"code"`
+				Data json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+				outcomes[i] = outcome{code: -1}
+				return
+			}
+			var resp batchResp
+			_ = json.Unmarshal(env.Data, &resp)
+			outcomes[i] = outcome{code: env.Code, created: len(resp.Created), failed: resp.Failed, skipped: resp.Skipped}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	totalCreated := 0
+	existsReported := 0
+	for _, o := range outcomes {
+		if o.code != http.StatusOK {
+			t.Fatalf("并发批量都应 200，实得 code=%d", o.code)
+		}
+		totalCreated += o.created
+		for _, f := range o.failed {
+			if f.Reason == "exists" {
+				existsReported++
+			}
+		}
+	}
+	if totalCreated != 1 {
+		t.Fatalf("四个并发请求应恰好建 1 行，实得 %d", totalCreated)
+	}
+	if existsReported != racers-1 {
+		t.Fatalf("撞索引的 %d 个输家都应报 exists 失败，实得 %d（skipped=%+v）",
+			racers-1, existsReported, outcomes)
+	}
+	var rows int64
+	models.DB.Model(&models.ModelWithProvider{}).Where("provider_model = ?", "race-a").Count(&rows)
+	if rows != 1 {
+		t.Fatalf("库里应恰 1 行，实得 %d", rows)
 	}
 }

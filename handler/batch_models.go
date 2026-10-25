@@ -273,9 +273,12 @@ func BatchBackfillMetadata(c *gin.Context) {
 	}
 	manager := modelMetaManager()
 	suggestions := make(map[pmKey]modelmeta.Suggestion, len(needSuggest))
+	missingProvider := make(map[pmKey]bool)
 	for key := range needSuggest {
 		p, ok := providerByID[key.providerID]
 		if !ok {
+			// 供应商行没了（被删）：给个说得出口的原因码，别让前端渲染空串
+			missingProvider[key] = true
 			continue
 		}
 		suggestions[key] = manager.Suggest(ctx, modelmeta.Query{
@@ -287,7 +290,12 @@ func BatchBackfillMetadata(c *gin.Context) {
 	}
 
 	for _, row := range rows {
-		sug := suggestions[pmKey{row.ProviderID, row.ProviderModel}]
+		key := pmKey{row.ProviderID, row.ProviderModel}
+		if missingProvider[key] {
+			resp.Unfilled = append(resp.Unfilled, BackfillUnfilledItem{row.ID, row.ProviderModel, "provider_not_found"})
+			continue
+		}
+		sug := suggestions[key]
 		if !sug.Matched {
 			resp.Unfilled = append(resp.Unfilled, BackfillUnfilledItem{row.ID, row.ProviderModel, sug.Reason})
 			continue
