@@ -199,7 +199,38 @@ POST /api/model-providers/batch/backfill  对已存在关联批量补填空位�
 | 上游腹案撞车 | §4.0 硬门槛先对齐 | 文档层调整 |
 | breaker nodes 泄漏 | PR-1 顺手修（删关联清 node） | 独立提交可单独 revert |
 
-## 八、红队评审记录与决策日志（v2 改写依据）
+## 八、实施与红队对抗记录（2026-10-25 执行完毕）
+
+实施落在分支 `feat/association-batch-ops`（10 个提交），全量门禁：go vet/test 全绿、
+vitest 1106、build 通过、e2e 五套（batch 5/5、backup_scale 2/2、backup 3/3、selfheal
+9/9+4/4、matrix 24/24）、覆盖率 78.9%（阈值 70）。真机实测：存量重复行迁移清洗、
+全端点 curl、真实 models.dev autofill 冷启动 → backfill 补价闭环（claude-sonnet-4-5
+真实价 3/0.3/15 USD + 币种联动）、浏览器冒烟含 #54 手填兜底形态。
+
+实施后又派两轮红队对抗 diff（A=后端正确性、B=前端与测试盲区），处置：
+
+| 发现 | 级别 | 处置 |
+|---|---|---|
+| A：同名挂载弹窗实际发笛卡尔（N 同名模型建 N×N 条，测试只勾 1 个未暴露） | P1 | 改发 pairs；双选用例钉住 |
+| A：backup_scale S1 未挂备用、断言空真 | P1 | 挂活备用 + 断言零命中 |
+| B：导入向导重试对第一步新建的模型静默失效（id 映射查不到） | P0 | 重试从 stepAResult 重建映射；失败项直接构造 pairs |
+| B：预览后改配置不失效，确认提交旧配置 | P1 | 进请求体的状态变更即清预览与确认入口 |
+| B：结果阶段重试用当前表单现场重建而非提交快照 | P1 | lastSubmitRef 快照 + pairs 化重试 |
+| B：attach 开关取消后入口消失（单向门） | P1 | 渲染条件去掉 attachExisting |
+| B：批量测试后未测行近况条永转圈 | P1 | 全量刷新 |
+| A：ids 端点无上限（>32766 驱动层 500） | P2 | validateBatchIDs 上限 1000 |
+| A：autofill 预算耗尽吞掉已跑完条目的真实原因 | P2 | done 位分类 |
+| A：skip_existing=false 时事务内撞索引仍报 skipped | P2 | 按 skipExisting 分流 + 并发分类测试 |
+| A：backfill 供应商已删时原因码为空 | P2 | provider_not_found |
+| B：weight 快编双触发 / 表头半选态 / 粘贴框无名 / aria 硬编码 / 数值 0 可整批 400 / 删除死分支 / attach-only 计数不刷新 | P2 | 全部修复 |
+
+记录不修（含理由）：
+- backfill 未做并发上限+预算（方案偏差）：catalog 未就绪时立即返回不阻塞、就绪后纯内存查，实测无感知；留待真正出现慢查询再说。
+- 混合来源价格币种口径（显式一档+补全其余档可能异币种标注）：与方案原文一致的取舍，autofill 报告逐格可见。
+- `Model.Name` 无唯一索引（批量建模型靠事务内预查）：SQLite 单写者下无竞态窗口；加索引与存量清洗列入上游 issue 对齐清单。
+- 批量创建"事务级失败整组转 failed"分支无测试钉子：构造该故障需 mock 事务提交失败，收益低于成本；并发分类测试已覆盖同文件的相邻分支。
+
+## 九、方案红队评审记录与决策日志（v2 改写依据）
 
 三轮红队（①操作风险/UX 4P0·7P1·4P2；②数据与 API 契约 3P0·5P1·2P2；③调度与上游品味 4P0·4P1·2P2），关键处置：
 
