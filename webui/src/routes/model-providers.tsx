@@ -556,6 +556,30 @@ export default function ModelProvidersPage() {
 
   const handleBulkStatus = async (status: boolean) => {
     if (selectedAssocIds.length === 0) return;
+    // 停用守卫（方案 §4.1.3）：选中停用后某模型将没有任何启用关联时先确认——
+    // /v1/models 只看"存在关联"不看状态，停用后模型仍出现在列表里，客户端
+    // 调用只会落 "not provider for model"。启用方向不需要这道门。
+    if (!status) {
+      const enabledCountByModel = new Map<number, number>();
+      for (const a of modelProviders) {
+        if (a.Status ?? false) {
+          enabledCountByModel.set(a.ModelID, (enabledCountByModel.get(a.ModelID) ?? 0) + 1);
+        }
+      }
+      const stripped = selectedAssocIds.map((id) => modelProviders.find((a) => a.ID === id)).filter((a): a is ModelWithProvider => !!a);
+      const atRiskModels = [...new Set(stripped.map((a) => a.ModelID))].filter((mid) => {
+        const total = enabledCountByModel.get(mid) ?? 0;
+        const selected = stripped.filter((a) => a.ModelID === mid).length;
+        return total === selected;
+      });
+      if (atRiskModels.length > 0) {
+        const names = atRiskModels
+          .map((mid) => models.find((m) => m.ID === mid)?.Name ?? String(mid))
+          .join(", ");
+        const ok = window.confirm(t("toast.bulk_disable_warning", { models: names }));
+        if (!ok) return;
+      }
+    }
     setBulkPending(true);
     try {
       const res = await batchUpdateModelProviderStatus(selectedAssocIds, status);

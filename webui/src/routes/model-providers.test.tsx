@@ -206,7 +206,7 @@ async function openAssociationDialog(providerModel = "gpt-4o") {
 beforeEach(async () => {
   vi.clearAllMocks()
   mocked.getModelOptions.mockResolvedValue([model()])
-  mocked.getProviders.mockResolvedValue([provider()])
+  mocked.getProviders.mockResolvedValue([provider(), provider({ ID: 12, Name: "prov-b" })])
   mocked.getModelProviders.mockImplementation(async (id: number) => associationsOf(id))
   mocked.getModelProviderStatus.mockResolvedValue([true, false])
   mocked.getProviderModels.mockResolvedValue([])
@@ -1102,7 +1102,7 @@ describe("模型路由页 · 批量运维", () => {
     await within(t).findByText("gpt-4o")
 
     // 默认按权重降序，第一行数据是 mini(8)；按可访问名直接定位更稳
-    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o" }))
+    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o · prov-a" }))
 
     // 工具栏在表格容器之外，用 screen 断言；数量用 aria-live 播报
     expect(await screen.findByText("已选 1 项")).toBeInTheDocument()
@@ -1119,6 +1119,57 @@ describe("模型路由页 · 批量运维", () => {
     )
   })
 
+  it("批量停用把某模型的启用关联全选上时先确认；确认后照发", async () => {
+    const user = userEvent.setup()
+    // 模型 1 只有两条启用关联（associationsOf 的基线）：全选 = 清空
+    renderPage("/model-providers?modelId=1")
+    await screen.findByRole("button", { name: /返回模型列表/ })
+    const t = await table()
+    await within(t).findByText("gpt-4o")
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false)
+    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o · prov-a" }))
+    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o-mini · prov-b" }))
+    expect(await screen.findByText("已选 2 项")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "停用" }))
+
+    // 拒绝确认：请求不发出去
+    await waitFor(() =>
+      expect(confirm).toHaveBeenCalledWith(expect.stringContaining("gpt-test")),
+    )
+    expect(mockedBatch.batchUpdateModelProviderStatus).not.toHaveBeenCalled()
+    expect(await screen.findByText("已选 2 项")).toBeInTheDocument()
+
+    // 改主意：确认后照发
+    confirm.mockReturnValue(true)
+    mockedBatch.batchUpdateModelProviderStatus.mockResolvedValue({ updated: [101, 102], not_found: [] })
+    await user.click(screen.getByRole("button", { name: "停用" }))
+    await waitFor(() =>
+      expect(mockedBatch.batchUpdateModelProviderStatus).toHaveBeenCalledWith([101, 102], false),
+    )
+    confirm.mockRestore()
+  })
+
+  it("选中只占某模型启用关联的一部分时停用不设卡", async () => {
+    const user = userEvent.setup()
+    renderPage("/model-providers?modelId=1")
+    await screen.findByRole("button", { name: /返回模型列表/ })
+    const t = await table()
+    await within(t).findByText("gpt-4o")
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false)
+    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o · prov-a" }))
+    expect(await screen.findByText("已选 1 项")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "停用" }))
+    await waitFor(() =>
+      expect(mockedBatch.batchUpdateModelProviderStatus).toHaveBeenCalledWith([101], false),
+    )
+    expect(confirm).not.toHaveBeenCalled()
+    confirm.mockRestore()
+  })
+
   it("筛选把已选行筛掉时，选区同步收缩（隐藏即取消选中）", async () => {
     const user = userEvent.setup()
     renderPage("/model-providers?modelId=1")
@@ -1126,8 +1177,8 @@ describe("模型路由页 · 批量运维", () => {
     const t = await table()
     await within(t).findByText("gpt-4o")
 
-    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o" }))
-    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o-mini" }))
+    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o · prov-a" }))
+    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o-mini · prov-b" }))
     expect(await screen.findByText("已选 2 项")).toBeInTheDocument()
 
     // 搜索 gpt-4o：mini 那行被筛掉，选区只剩它
