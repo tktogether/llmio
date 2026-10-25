@@ -220,3 +220,35 @@ func TestBreakerHalfOpenDeleteReopens(t *testing.T) {
 		t.Fatalf("underlying Delete calls = %v, want [7]", spy.deletes)
 	}
 }
+
+// TestForgetDropsNode：Forget 之后节点不再驻留——BalancerWrapperBreaker
+// 的全表扫描成本随"当前关联数"而不是"历史关联总数"增长，这条测试守住
+// 删关联时的清账动作。
+func TestForgetDropsNode(t *testing.T) {
+	resetBreakerState(t)
+	withBreakerConfig(t, 3, 50*time.Millisecond, 2)
+
+	spy := &spyBalancer{nextKey: 7}
+	wrapped := BalancerWrapperBreaker(spy)
+	if _, err := wrapped.Pop(); err != nil {
+		t.Fatalf("pop: %v", err)
+	}
+	mu.Lock()
+	if _, ok := nodes[7]; !ok {
+		mu.Unlock()
+		t.Fatal("pop 后节点应已注册")
+	}
+	mu.Unlock()
+
+	Forget(7)
+
+	mu.Lock()
+	_, ok := nodes[7]
+	mu.Unlock()
+	if ok {
+		t.Fatal("Forget 后节点应被移除")
+	}
+
+	// 忘掉一个不存在的键不该 panic（幂等）
+	Forget(12345)
+}

@@ -52,6 +52,18 @@ func BalancerWrapperBreaker(balancer Balancer) *Breaker {
 	return &Breaker{Balancer: balancer}
 }
 
+// Forget 丢弃一条关联的熔断状态。
+//
+// nodes 是只增不减的包级表，而 BalancerWrapperBreaker 每次构造都要全表扫
+// 一遍：关联被删除后节点若继续驻留，扫描成本随"历史关联总数"而不是"当前
+// 关联数"增长——批量创建/删除把行数推上新的量级后，这就是热路径上一笔
+// 无上限的税。删关联的地方调用它清账。
+func Forget(key uint) {
+	mu.Lock()
+	defer mu.Unlock()
+	delete(nodes, key)
+}
+
 func (b *Breaker) Pop() (uint, error) {
 	key, err := b.Balancer.Pop()
 	if err != nil {
