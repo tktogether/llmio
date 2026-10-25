@@ -1,7 +1,17 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
@@ -89,6 +99,32 @@ export default function ModelProvidersPage() {
   const [selectedAssocIds, setSelectedAssocIds] = useState<number[]>([]);
   const [bulkPending, setBulkPending] = useState(false);
   const [bulkTestProgress, setBulkTestProgress] = useState<{ done: number; total: number } | null>(null);
+  /** 停用守卫确认框：非 null 表示有待确认的风险模型清单 */
+  const [bulkDisableConfirmOpen, setBulkDisableConfirmOpen] = useState(false);
+
+  // 停用风险模型：选中范围恰含其全部启用关联的模型（守卫触发条件）。
+  // 放渲染期派生而不是事件里算，AlertDialog 的文案与判断永远同源。
+  const bulkDisableRiskModels = useMemo(() => {
+    if (selectedAssocIds.length === 0) return [] as string[];
+    const enabledCountByModel = new Map<number, number>();
+    for (const a of modelProviders) {
+      if (a.Status ?? false) {
+        enabledCountByModel.set(a.ModelID, (enabledCountByModel.get(a.ModelID) ?? 0) + 1);
+      }
+    }
+    const stripped = selectedAssocIds
+      .map((id) => modelProviders.find((a) => a.ID === id))
+      .filter((a): a is ModelWithProvider => !!a);
+    const atRisk = new Set<string>();
+    for (const mid of new Set(stripped.map((a) => a.ModelID))) {
+      const total = enabledCountByModel.get(mid) ?? 0;
+      const selected = stripped.filter((a) => a.ModelID === mid).length;
+      if (total === selected) {
+        atRisk.add(models.find((m) => m.ID === mid)?.Name ?? String(mid));
+      }
+    }
+    return [...atRisk];
+  }, [selectedAssocIds, modelProviders, models]);
 
   // 总览上的筛选：既决定列表里剩哪些模型，也决定能不能拖拽排序
   // （带着筛选拖，拖出来的局部顺序会被当成全量顺序保存）。
@@ -559,27 +595,14 @@ export default function ModelProvidersPage() {
     // 停用守卫（方案 §4.1.3）：选中停用后某模型将没有任何启用关联时先确认——
     // /v1/models 只看"存在关联"不看状态，停用后模型仍出现在列表里，客户端
     // 调用只会落 "not provider for model"。启用方向不需要这道门。
-    if (!status) {
-      const enabledCountByModel = new Map<number, number>();
-      for (const a of modelProviders) {
-        if (a.Status ?? false) {
-          enabledCountByModel.set(a.ModelID, (enabledCountByModel.get(a.ModelID) ?? 0) + 1);
-        }
-      }
-      const stripped = selectedAssocIds.map((id) => modelProviders.find((a) => a.ID === id)).filter((a): a is ModelWithProvider => !!a);
-      const atRiskModels = [...new Set(stripped.map((a) => a.ModelID))].filter((mid) => {
-        const total = enabledCountByModel.get(mid) ?? 0;
-        const selected = stripped.filter((a) => a.ModelID === mid).length;
-        return total === selected;
-      });
-      if (atRiskModels.length > 0) {
-        const names = atRiskModels
-          .map((mid) => models.find((m) => m.ID === mid)?.Name ?? String(mid))
-          .join(", ");
-        const ok = window.confirm(t("toast.bulk_disable_warning", { models: names }));
-        if (!ok) return;
-      }
+    if (!status && bulkDisableRiskModels.length > 0) {
+      setBulkDisableConfirmOpen(true);
+      return;
     }
+    await runBulkStatus(status);
+  };
+
+  const runBulkStatus = async (status: boolean) => {
     setBulkPending(true);
     try {
       const res = await batchUpdateModelProviderStatus(selectedAssocIds, status);
@@ -926,6 +949,43 @@ export default function ModelProvidersPage() {
         onClose={() => setModelDeleteId(null)}
         onConfirm={handleDeleteModel}
       />
+
+      {/* 停用守卫确认框（框架内 AlertDialog，不用 window.confirm：原生弹窗
+          被 window 接管，样式脱节且嵌入式 webview 里不可测）。只列风险
+          模型清单；取消/关闭都不动请求。 */}
+      <AlertDialog
+        open={bulkDisableConfirmOpen}
+        onOpenChange={(next) => { if (!next) setBulkDisableConfirmOpen(false); }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("toast.bulk_disable_title", { count: bulkDisableRiskModels.length })}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p>{t("toast.bulk_disable_desc")}</p>
+                <div className="max-h-32 overflow-y-auto rounded-md border px-2 py-1 text-xs font-mono">
+                  {bulkDisableRiskModels.map((name) => (
+                    <div key={name}>{name}</div>
+                  ))}
+                </div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={bulkPending}>
+              {t("common:actions.cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={bulkPending}
+              onClick={() => { setBulkDisableConfirmOpen(false); void runBulkStatus(false); }}
+            >
+              {t("toast.bulk_disable_confirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <ModelFormDialog
         open={modelEditor.open}

@@ -1119,7 +1119,7 @@ describe("模型路由页 · 批量运维", () => {
     )
   })
 
-  it("批量停用把某模型的启用关联全选上时先确认；确认后照发", async () => {
+  it("批量停用把某模型的启用关联全选上时先弹确认框；确认后照发", async () => {
     const user = userEvent.setup()
     // 模型 1 只有两条启用关联（associationsOf 的基线）：全选 = 清空
     renderPage("/model-providers?modelId=1")
@@ -1127,28 +1127,33 @@ describe("模型路由页 · 批量运维", () => {
     const t = await table()
     await within(t).findByText("gpt-4o")
 
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false)
     await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o · prov-a" }))
     await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o-mini · prov-b" }))
     expect(await screen.findByText("已选 2 项")).toBeInTheDocument()
 
     await user.click(screen.getByRole("button", { name: "停用" }))
 
-    // 拒绝确认：请求不发出去
-    await waitFor(() =>
-      expect(confirm).toHaveBeenCalledWith(expect.stringContaining("gpt-test")),
-    )
+    // 框架内 AlertDialog（不是 window.confirm：原生弹窗被 window 接管，
+    // 样式脱节且嵌入式 webview 里不可测）。守卫弹出、请求先不发
+    const dialog = await screen.findByRole("alertdialog")
+    expect(dialog).toHaveTextContent(/没有任何启用关联/)
+    expect(dialog).toHaveTextContent("gpt-test")
     expect(mockedBatch.batchUpdateModelProviderStatus).not.toHaveBeenCalled()
-    expect(await screen.findByText("已选 2 项")).toBeInTheDocument()
 
-    // 改主意：确认后照发
-    confirm.mockReturnValue(true)
-    mockedBatch.batchUpdateModelProviderStatus.mockResolvedValue({ updated: [101, 102], not_found: [] })
+    // 取消：请求不发、选区保留、框收起
+    await user.click(within(dialog).getByRole("button", { name: "取消" }))
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+    expect(mockedBatch.batchUpdateModelProviderStatus).not.toHaveBeenCalled()
+    expect(screen.getByText("已选 2 项")).toBeInTheDocument()
+
+    // 再点停用 → 确认：照发
     await user.click(screen.getByRole("button", { name: "停用" }))
+    const dialog2 = await screen.findByRole("alertdialog")
+    mockedBatch.batchUpdateModelProviderStatus.mockResolvedValue({ updated: [101, 102], not_found: [] })
+    await user.click(within(dialog2).getByRole("button", { name: "仍然停用" }))
     await waitFor(() =>
       expect(mockedBatch.batchUpdateModelProviderStatus).toHaveBeenCalledWith([101, 102], false),
     )
-    confirm.mockRestore()
   })
 
   it("选中只占某模型启用关联的一部分时停用不设卡", async () => {
@@ -1158,7 +1163,6 @@ describe("模型路由页 · 批量运维", () => {
     const t = await table()
     await within(t).findByText("gpt-4o")
 
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false)
     await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o · prov-a" }))
     expect(await screen.findByText("已选 1 项")).toBeInTheDocument()
 
@@ -1166,8 +1170,8 @@ describe("模型路由页 · 批量运维", () => {
     await waitFor(() =>
       expect(mockedBatch.batchUpdateModelProviderStatus).toHaveBeenCalledWith([101], false),
     )
-    expect(confirm).not.toHaveBeenCalled()
-    confirm.mockRestore()
+    // 直接执行，不弹守卫
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument()
   })
 
   it("筛选把已选行筛掉时，选区同步收缩（隐藏即取消选中）", async () => {
