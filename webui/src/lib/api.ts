@@ -356,6 +356,8 @@ export async function updateModelProvider(id: number, association: {
   structured_output?: boolean;
   image?: boolean;
   with_header?: boolean;
+  /** 备用标记（后端 PR #96 起支持；此前漏在声明里，payload 实际一直带着） */
+  backup?: boolean;
   customer_headers?: Record<string, string>;
   extra_body?: Record<string, unknown>;
   weight?: number;
@@ -450,6 +452,152 @@ export async function updateModelProviderStatus(id: number, status: boolean): Pr
 export async function deleteModelProvider(id: number): Promise<void> {
   await apiRequest<void>(`/model-providers/${id}`, {
     method: 'DELETE',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 批量关联（POST /api/model-providers/batch 族）
+//
+// 与单条路径的差异全部集中在三态：defaults 里六个元数据位可空——
+// null/undefined = 留给服务端按元数据建议补（补不了落 false/0），
+// 显式值（含显式 false / 0）是用户意志，服务端不补不改。
+// ---------------------------------------------------------------------------
+
+export interface BatchAssociationDefaults {
+  weight: number;
+  with_header: boolean;
+  backup: boolean;
+  /** null/undefined = 自动补全；false = 显式关闭 */
+  tool_call?: boolean | null;
+  structured_output?: boolean | null;
+  image?: boolean | null;
+  /** null/undefined = 自动补全；0 = 显式免费/不计费 */
+  input_price?: number | null;
+  cache_read_price?: number | null;
+  output_price?: number | null;
+  customer_headers?: Record<string, string>;
+  extra_body?: Record<string, unknown>;
+  currency?: string;
+  peak?: PeakTerms | null;
+}
+
+export interface BatchModelProviderRequest {
+  model_ids: number[];
+  provider_id: number;
+  provider_models: string[];
+  /** 显式配对（导入向导用）：给了就忽略 model_ids × provider_models */
+  pairs?: { model_id: number; provider_model: string }[];
+  defaults: BatchAssociationDefaults;
+  /** 默认 true：整批重交幂等 */
+  skip_existing?: boolean;
+  /** 默认 true（还要 autofill 策略总开关开着） */
+  autofill_meta?: boolean;
+  /** true = 零写入预览：created 里是"将要写入的完整行"（ID=0） */
+  dry_run?: boolean;
+}
+
+export interface BatchAutofillReport {
+  source?: string;
+  filled?: Record<string, unknown>;
+}
+
+export interface BatchCreatedItem extends ModelWithProvider {
+  Autofill?: BatchAutofillReport | null;
+}
+
+export interface BatchSkippedItem {
+  model_id: number;
+  provider_model: string;
+  reason: string;
+  existing_status: boolean | null;
+}
+
+export interface BatchFailedItem {
+  model_id: number;
+  provider_model: string;
+  reason: string;
+}
+
+export interface BatchUnfilledItem {
+  provider_model: string;
+  reason: string;
+}
+
+export interface BatchCreateResult {
+  dry_run: boolean;
+  created: BatchCreatedItem[];
+  skipped: BatchSkippedItem[];
+  failed: BatchFailedItem[];
+  unfilled: BatchUnfilledItem[];
+}
+
+export async function batchCreateModelProviders(req: BatchModelProviderRequest): Promise<BatchCreateResult> {
+  return apiRequest<BatchCreateResult>('/model-providers/batch', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  });
+}
+
+export interface BatchMutationResult {
+  updated?: number[];
+  deleted?: number[];
+  not_found?: number[];
+}
+
+export async function batchUpdateModelProviderStatus(ids: number[], status: boolean): Promise<BatchMutationResult> {
+  return apiRequest<BatchMutationResult>('/model-providers/batch/status', {
+    method: 'POST',
+    body: JSON.stringify({ ids, status }),
+  });
+}
+
+export async function batchDeleteModelProviders(ids: number[]): Promise<BatchMutationResult> {
+  return apiRequest<BatchMutationResult>('/model-providers/batch/delete', {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 从供应商导入（两步编排）+ 元数据补填
+//
+// 第一步批量建逻辑模型（数值字段可空 = 服务端默认；批量路径里 0 是毒药：
+// time_out=0 必超时、max_retry=0 零重试）。第二步用 pairs 逐对挂关联。
+// backfill 是 autofill 冷启动后的事后出口：补空位（价格为 0 的档位会被
+// 数据源价覆盖，报告逐字段可见）。
+// ---------------------------------------------------------------------------
+
+export interface BatchModelDefaults {
+  strategy?: string | null;
+  max_retry?: number | null;
+  time_out?: number | null;
+  breaker?: boolean | null;
+  prefer_direct?: boolean | null;
+}
+
+export interface BatchModelsResult {
+  created: Model[];
+  skipped: { name: string; reason: string }[];
+}
+
+export async function batchCreateModels(names: string[], defaults?: BatchModelDefaults): Promise<BatchModelsResult> {
+  return apiRequest<BatchModelsResult>('/models/batch', {
+    method: 'POST',
+    body: JSON.stringify({ names, defaults: defaults ?? {} }),
+  });
+}
+
+export interface BackfillResult {
+  filled: { id: number; source?: string; fields: Record<string, unknown> }[];
+  unchanged: number[];
+  not_found: number[];
+  unfilled: { id: number; provider_model: string; reason: string }[];
+}
+
+export async function backfillModelProviders(ids: number[]): Promise<BackfillResult> {
+  return apiRequest<BackfillResult>('/model-providers/batch/backfill', {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
   });
 }
 

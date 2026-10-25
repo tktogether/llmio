@@ -7,6 +7,7 @@ import ModelProvidersPage from "@/routes/model-providers"
 // 只导入要在断言里引用的那几个；其余端点由下面的 mock 工厂供给页面，
 // 不导入是刻意的——导入了却不用会让 tsc 报未使用
 import {
+  batchUpdateModelProviderStatus,
   configAPI,
   createModel,
   createModelProvider,
@@ -50,6 +51,11 @@ vi.mock("@/lib/api", () => ({
   getModelMetadata: vi.fn(),
   createModel: vi.fn(),
   createModelProvider: vi.fn(),
+  batchCreateModelProviders: vi.fn(),
+  batchUpdateModelProviderStatus: vi.fn(),
+  batchDeleteModelProviders: vi.fn(),
+  batchCreateModels: vi.fn(),
+  backfillModelProviders: vi.fn(),
   deleteModel: vi.fn(),
   deleteModelProvider: vi.fn(),
   getModelOptions: vi.fn(),
@@ -80,6 +86,12 @@ const mocked = {
   previewPeakTerms: vi.mocked(previewPeakTerms),
   getConfig: vi.mocked(configAPI.getConfig),
   getModelMetadata: vi.mocked(getModelMetadata),
+  batchUpdateModelProviderStatus: vi.mocked(batchUpdateModelProviderStatus),
+}
+
+/** 批量运维那一组断言用的 mock 快照 */
+const mockedBatch = {
+  batchUpdateModelProviderStatus: vi.mocked(batchUpdateModelProviderStatus),
 }
 
 /**
@@ -411,10 +423,11 @@ describe("模型路由页 · 近期成败的读法", () => {
     const t = await table()
     await within(t).findByText("gpt-4o")
 
-    // 第 0 行是表头；第 4 列工具调用（true）、第 6 列视觉（false）
+    // 第 0 行是表头；多选列在最前（索引 0），第 5 列工具调用（true）、
+    // 第 7 列视觉（false）
     const cells = within(within(t).getAllByRole("row")[1]).getAllByRole("cell")
-    expect(within(cells[4]).getByRole("img", { name: "支持" })).toBeInTheDocument()
-    expect(within(cells[6]).getByRole("img", { name: "不支持" })).toBeInTheDocument()
+    expect(within(cells[5]).getByRole("img", { name: "支持" })).toBeInTheDocument()
+    expect(within(cells[7]).getByRole("img", { name: "不支持" })).toBeInTheDocument()
   })
 })
 
@@ -1077,5 +1090,48 @@ describe("关联表单 · 备用关联", () => {
     const { dialog } = await openAssociationDialog("gpt-4o")
 
     expect(within(dialog).getByRole("checkbox", { name: "备用关联" })).toBeChecked()
+  })
+})
+
+describe("模型路由页 · 批量运维", () => {
+  it("勾选行后工具栏播报数量；批量停用走批量端点并清选区", async () => {
+    const user = userEvent.setup()
+    renderPage("/model-providers?modelId=1")
+    await screen.findByRole("button", { name: /返回模型列表/ })
+    const t = await table()
+    await within(t).findByText("gpt-4o")
+
+    // 默认按权重降序，第一行数据是 mini(8)；按可访问名直接定位更稳
+    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o" }))
+
+    // 工具栏在表格容器之外，用 screen 断言；数量用 aria-live 播报
+    expect(await screen.findByText("已选 1 项")).toBeInTheDocument()
+
+    mockedBatch.batchUpdateModelProviderStatus.mockResolvedValue({ updated: [101], not_found: [] })
+    await user.click(screen.getByRole("button", { name: "停用" }))
+
+    await waitFor(() =>
+      expect(mockedBatch.batchUpdateModelProviderStatus).toHaveBeenCalledWith([101], false),
+    )
+    // 停用后重拉列表、选区清空
+    await waitFor(() =>
+      expect(screen.queryByText("已选 1 项")).not.toBeInTheDocument(),
+    )
+  })
+
+  it("筛选把已选行筛掉时，选区同步收缩（隐藏即取消选中）", async () => {
+    const user = userEvent.setup()
+    renderPage("/model-providers?modelId=1")
+    await screen.findByRole("button", { name: /返回模型列表/ })
+    const t = await table()
+    await within(t).findByText("gpt-4o")
+
+    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o" }))
+    await user.click(within(t).getByRole("checkbox", { name: "选择 gpt-4o-mini" }))
+    expect(await screen.findByText("已选 2 项")).toBeInTheDocument()
+
+    // 搜索 gpt-4o：mini 那行被筛掉，选区只剩它
+    await user.type(screen.getByPlaceholderText("按提供商/模型搜索"), "mini")
+    expect(await screen.findByText("已选 1 项")).toBeInTheDocument()
   })
 })

@@ -10,7 +10,12 @@ import {
   getModelProviders,
   getModelProviderStatus,
   updateModelProviderStatus,
+  updateModelProvider,
   deleteModelProvider,
+  batchUpdateModelProviderStatus,
+  batchDeleteModelProviders,
+  backfillModelProviders,
+  testModelProvider,
   deleteModel,
   getModelOptions,
   getProviders,
@@ -24,6 +29,8 @@ import { useModelProviderTesting } from "@/routes/model-providers/use-model-prov
 import { sortModelsByOrder, useModelOrder } from "@/routes/model-providers/use-model-order";
 import { useModelEditor } from "@/routes/model-providers/use-model-editor";
 import { ModelProviderFormDialog } from "@/routes/model-providers/model-provider-form-dialog";
+import { BatchAssociationDialog } from "@/routes/model-providers/batch-association-dialog";
+import { ImportWizard } from "@/routes/model-providers/import-wizard";
 import { ModelProviderTestDialog } from "@/routes/model-providers/model-provider-test-dialog";
 import { ModelList } from "@/routes/model-providers/model-list";
 import { AssociationList } from "@/routes/model-providers/association-list";
@@ -73,6 +80,15 @@ export default function ModelProvidersPage() {
   const [overviewError, setOverviewError] = useState<string | null>(null);
   /** 取该模型关联失败的原文，同上 */
   const [associationsError, setAssociationsError] = useState<string | null>(null);
+  // ── 批量关联与批量运维 ──
+  const [batchDialogOpen, setBatchDialogOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  /** 批量运维选中的关联 ID。筛选变化时被筛掉的行会被清出选区
+   *  （"隐藏即取消选中"）：选着 30 条、改一下搜索词、再批量删，
+   *  撞上的应该是看得见的那部分，不是记忆里的 30 条。 */
+  const [selectedAssocIds, setSelectedAssocIds] = useState<number[]>([]);
+  const [bulkPending, setBulkPending] = useState(false);
+  const [bulkTestProgress, setBulkTestProgress] = useState<{ done: number; total: number } | null>(null);
 
   // 总览上的筛选：既决定列表里剩哪些模型，也决定能不能拖拽排序
   // （带着筛选拖，拖出来的局部顺序会被当成全量顺序保存）。
@@ -509,6 +525,170 @@ export default function ModelProvidersPage() {
     return weightSortOrder === "asc" ? a.Weight - b.Weight : b.Weight - a.Weight;
   });
 
+  // 隐藏即取消选中：选区永远 ⊆ 当前可见行
+  useEffect(() => {
+    setSelectedAssocIds((prev) => {
+      const visible = new Set(sortedModelProviders.map((a) => a.ID));
+      const next = prev.filter((id) => visible.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [sortedModelProviders]);
+
+  const visibleIdsAllSelected =
+    sortedModelProviders.length > 0 &&
+    sortedModelProviders.every((a) => selectedAssocIds.includes(a.ID));
+
+  const handleToggleSelect = (id: number) => {
+    setSelectedAssocIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
+
+  const handleToggleSelectAll = () => {
+    setSelectedAssocIds((prev) => {
+      if (visibleIdsAllSelected) {
+        const visible = new Set(sortedModelProviders.map((a) => a.ID));
+        return prev.filter((id) => !visible.has(id));
+      }
+      return [...new Set([...prev, ...sortedModelProviders.map((a) => a.ID)])];
+    });
+  };
+
+  const handleBulkStatus = async (status: boolean) => {
+    if (selectedAssocIds.length === 0) return;
+    setBulkPending(true);
+    try {
+      const res = await batchUpdateModelProviderStatus(selectedAssocIds, status);
+      toast.success(
+        t("toast.bulk_status_done", {
+          count: res.updated?.length ?? 0,
+          status,
+        }),
+      );
+      setSelectedAssocIds([]);
+      if (selectedModelId) {
+        await fetchModelProviders(selectedModelId);
+      }
+    } catch (err) {
+      toast.error(t("toast.bulk_status_failed", { message: messageOf(err) }));
+    } finally {
+      setBulkPending(false);
+    }
+  };
+
+  const handleBulkDelete = async (ids: number[]) => {
+    setBulkPending(true);
+    try {
+      const res = await batchDeleteModelProviders(ids);
+      toast.success(
+        t("toast.bulk_delete_done", { count: res.deleted?.length ?? 0 }),
+      );
+      setSelectedAssocIds([]);
+      if (selectedModelId) {
+        await fetchModelProviders(selectedModelId);
+      } else {
+        await refreshModelAssociationCount(selectedModelId ?? 0);
+      }
+    } catch (err) {
+      toast.error(t("toast.bulk_delete_failed", { message: messageOf(err) }));
+    } finally {
+      setBulkPending(false);
+    }
+  };
+
+  /** 批量测试：并发 3 的池子跑完，进度条说话，结束刷新近况条 */
+  const handleBulkTest = async (ids: number[]) => {
+    if (ids.length === 0) return;
+    setBulkPending(true);
+    setBulkTestProgress({ done: 0, total: ids.length });
+    let ok = 0;
+    let fail = 0;
+    try {
+      const queue = [...ids];
+      const worker = async () => {
+        while (queue.length > 0) {
+          const id = queue.shift()!;
+          try {
+            const result = await testModelProvider(id);
+            if (result && typeof result === "object" && "error" in result && (result as { error?: string }).error) {
+              fail++;
+            } else {
+              ok++;
+            }
+          } catch {
+            fail++;
+          }
+          setBulkTestProgress((prev) =>
+            prev ? { ...prev, done: prev.done + 1 } : prev,
+          );
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+      toast.success(t("toast.bulk_test_done", { ok, fail }));
+      setSelectedAssocIds([]);
+      if (selectedModelId) {
+        loadProviderStatus(
+          modelProviders.filter((a) => ids.includes(a.ID)),
+          selectedModelId,
+        );
+      }
+    } finally {
+      setBulkTestProgress(null);
+      setBulkPending(false);
+    }
+  };
+
+  /** 补全元数据（backfill）：对选中关联补空位；价格为 0 的档位会被数据源价
+   *  覆盖——确认对话框里把这句话说清楚，报告逐字段可见 */
+  const handleBackfill = async (ids: number[]) => {
+    setBulkPending(true);
+    try {
+      const res = await backfillModelProviders(ids);
+      toast.success(t("toast.backfill_done", {
+        filled: res.filled.length,
+        unchanged: res.unchanged.length,
+        unfilled: res.unfilled.length,
+      }));
+      setSelectedAssocIds([]);
+      if (selectedModelId) {
+        await fetchModelProviders(selectedModelId);
+      }
+    } catch (err) {
+      toast.error(t("toast.backfill_failed", { message: messageOf(err) }));
+    } finally {
+      setBulkPending(false);
+    }
+  };
+
+  /** weight 行内快编：PUT 是全量替换，payload 从行数据重建 */
+  const handleWeightSave = async (association: ModelWithProvider, weight: number) => {
+    try {
+      await updateModelProvider(association.ID, {
+        model_id: association.ModelID,
+        provider_id: association.ProviderID,
+        provider_name: association.ProviderModel,
+        tool_call: association.ToolCall ?? false,
+        structured_output: association.StructuredOutput ?? false,
+        image: association.Image ?? false,
+        with_header: association.WithHeader ?? false,
+        backup: association.Backup ?? false,
+        customer_headers: association.CustomerHeaders ?? {},
+        extra_body: association.ExtraBody ?? {},
+        weight,
+        input_price: association.InputPrice ?? 0,
+        cache_read_price: association.CacheReadPrice ?? 0,
+        output_price: association.OutputPrice ?? 0,
+        currency: association.Currency || "CNY",
+        peak: association.Peak ?? null,
+      });
+      setModelProviders((prev) =>
+        prev.map((item) => (item.ID === association.ID ? { ...item, Weight: weight } : item)),
+      );
+    } catch (err) {
+      toast.error(t("toast.weight_save_failed", { message: messageOf(err) }));
+    }
+  };
+
   const hasAssociationFilter = selectedProviderType !== "all" || providerSearchTerm.length > 0;
   const getAssociationCountNumberText = (modelId: number) => {
     const count = modelAssociationCountMap[modelId];
@@ -539,6 +719,9 @@ export default function ModelProvidersPage() {
               <Button variant="outline" className="h-8 text-xs" onClick={handleBackToModelCards}>
                 <ArrowLeft className="size-3.5" />
                 {t('actions.back_to_list')}
+              </Button>
+              <Button variant="outline" className="h-8 text-xs" onClick={() => setBatchDialogOpen(true)}>
+                {t('actions.batch_association')}
               </Button>
               <Button onClick={() => openCreateDialog()} className="h-8 text-xs">
                 {t('actions.add_association')}
@@ -578,9 +761,15 @@ export default function ModelProvidersPage() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="flex items-end">
+              <div className="flex items-end gap-2">
                 <Button onClick={modelEditor.openCreate} className="h-8 text-xs shrink-0">
                   {t('actions.add_model')}
+                </Button>
+                <Button variant="outline" onClick={() => setImportOpen(true)} className="h-8 text-xs shrink-0">
+                  {t('actions.import_from_provider')}
+                </Button>
+                <Button variant="outline" onClick={() => setBatchDialogOpen(true)} className="h-8 text-xs shrink-0">
+                  {t('actions.batch_association')}
                 </Button>
               </div>
             </div>
@@ -695,6 +884,16 @@ export default function ModelProvidersPage() {
             onCloseDelete={() => setDeleteId(null)}
             onConfirmDelete={handleDelete}
             onStatusToggle={handleStatusToggle}
+            selectedIds={selectedAssocIds}
+            onToggleSelect={handleToggleSelect}
+            onToggleSelectAll={handleToggleSelectAll}
+            bulkPending={bulkPending}
+            onBulkStatus={handleBulkStatus}
+            onBulkDelete={handleBulkDelete}
+            onBulkTest={handleBulkTest}
+            onBackfill={handleBackfill}
+            bulkTestProgress={bulkTestProgress}
+            onWeightSave={handleWeightSave}
           />
         </>
       )}
@@ -751,6 +950,39 @@ export default function ModelProvidersPage() {
         testResults={testResults}
         reactTestResult={reactTestResult}
         executeTest={executeTest}
+      />
+
+      <BatchAssociationDialog
+        open={batchDialogOpen}
+        onOpenChange={setBatchDialogOpen}
+        models={models}
+        providers={providers}
+        providerModelsMap={providerModelsMap}
+        providerModelsLoading={providerModelsLoading}
+        loadProviderModels={loadProviderModels}
+        lockedModelId={selectedModelId}
+        onCompleted={async (touchedModelIds) => {
+          if (selectedModelId) {
+            await fetchModelProviders(selectedModelId);
+            return;
+          }
+          await Promise.all(
+            touchedModelIds
+              .filter((id) => id > 0)
+              .map((id) => refreshModelAssociationCount(id)),
+          );
+        }}
+      />
+
+      <ImportWizard
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        models={models}
+        providers={providers}
+        providerModelsMap={providerModelsMap}
+        providerModelsLoading={providerModelsLoading}
+        loadProviderModels={loadProviderModels}
+        onCompleted={loadOverview}
       />
     </div>
   );

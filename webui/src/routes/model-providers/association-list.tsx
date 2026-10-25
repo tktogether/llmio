@@ -1,4 +1,5 @@
 import { Pencil, RefreshCw, Trash2, Zap } from "lucide-react"
+import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import Loading from "@/components/loading"
@@ -15,6 +16,8 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import {
   Table,
@@ -66,6 +69,22 @@ type Props = {
   onCloseDelete: () => void
   onConfirmDelete: () => void
   onStatusToggle: (association: ModelWithProvider, nextStatus: boolean) => void
+  // ── 批量运维（仅桌面表格；手机卡片首版不支持多选，成对实现的约定在此豁免）──
+  /** 当前选中的关联 ID；由页面持有，筛选后隐藏的行会被页面清出选区 */
+  selectedIds: number[]
+  onToggleSelect: (id: number) => void
+  onToggleSelectAll: () => void
+  /** 任一批量请求在途时禁用全部批量按钮 */
+  bulkPending: boolean
+  onBulkStatus: (status: boolean) => void
+  onBulkDelete: (ids: number[]) => void
+  onBulkTest: (ids: number[]) => void
+  /** 补全空位元数据（价格为 0 的档位会被数据源价覆盖，确认对话框已声明） */
+  onBackfill: (ids: number[]) => void
+  /** 批量测试进度：null = 不在跑 */
+  bulkTestProgress: { done: number; total: number } | null
+  /** weight 行内快编：页面负责 PUT 全量 payload 并回填列表 */
+  onWeightSave: (association: ModelWithProvider, weight: number) => Promise<void>
 }
 
 /**
@@ -92,8 +111,51 @@ export function AssociationList({
   onCloseDelete,
   onConfirmDelete,
   onStatusToggle,
+  selectedIds,
+  onToggleSelect,
+  onToggleSelectAll,
+  bulkPending,
+  onBulkStatus,
+  onBulkDelete,
+  onBulkTest,
+  onBackfill,
+  bulkTestProgress,
+  onWeightSave,
 }: Props) {
   const { t } = useTranslation(["models", "common"])
+
+  const selectedIdSet = new Set(selectedIds)
+  const allVisibleSelected =
+    associations.length > 0 && associations.every((a) => selectedIdSet.has(a.ID))
+
+  /** 批量删除确认：N≥5 时确认按钮延迟 2 秒激活——误触全选后的一次点按
+   *  不该能清空一个模型的全部关联。 */
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false)
+  const [confirmArmed, setConfirmArmed] = useState(false)
+  useEffect(() => {
+    if (!bulkDeleteOpen) {
+      setConfirmArmed(false)
+      return
+    }
+    const timer = window.setTimeout(() => setConfirmArmed(true), selectedIds.length >= 5 ? 2000 : 0)
+    return () => window.clearTimeout(timer)
+  }, [bulkDeleteOpen, selectedIds.length])
+
+  /** weight 行内快编的编辑态（单行） */
+  const [editingWeightId, setEditingWeightId] = useState<number | null>(null)
+  const [weightDraft, setWeightDraft] = useState("")
+
+  const startWeightEdit = (association: ModelWithProvider) => {
+    setEditingWeightId(association.ID)
+    setWeightDraft(String(association.Weight))
+  }
+
+  const commitWeightEdit = async (association: ModelWithProvider) => {
+    setEditingWeightId(null)
+    const parsed = parseInt(weightDraft, 10)
+    if (Number.isNaN(parsed) || parsed < 1 || parsed === association.Weight) return
+    await onWeightSave(association, parsed)
+  }
 
   /** 四个能力列的取值方式一致：支持/不支持 */
   const capability = (ok: boolean) => (
@@ -151,11 +213,155 @@ export function AssociationList({
         </div>
       ) : (
         <div className="h-full flex flex-col">
+          {/* 批量工具栏（桌面）。选中数用 aria-live 播报——视觉浮现的
+              工具栏对读屏用户不产生任何事件。 */}
+          {(selectedIds.length > 0 || bulkTestProgress) && (
+            <div className="hidden sm:flex items-center gap-2 border-b px-3 py-2 flex-shrink-0">
+              <span className="text-xs text-muted-foreground" aria-live="polite">
+                {t("association_table.bulk.selected", { count: selectedIds.length })}
+              </span>
+              {bulkTestProgress ? (
+                <span className="text-xs text-muted-foreground">
+                  {t("association_table.bulk.testing", {
+                    done: bulkTestProgress.done,
+                    total: bulkTestProgress.total,
+                  })}
+                </span>
+              ) : (
+                <>
+                  <Button
+                    variant="outline" size="sm" className="h-7 text-xs"
+                    disabled={bulkPending}
+                    onClick={() => onBulkStatus(true)}
+                  >
+                    {t("association_table.bulk.enable")}
+                  </Button>
+                  <Button
+                    variant="outline" size="sm" className="h-7 text-xs"
+                    disabled={bulkPending}
+                    onClick={() => onBulkStatus(false)}
+                  >
+                    {t("association_table.bulk.disable")}
+                  </Button>
+                  {/* 批量测试是真实计费请求：N 条就是向上游打 N 发，
+                      确认文案必须把这笔账说在按下去之前。 */}
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="outline" size="sm" className="h-7 text-xs"
+                        disabled={bulkPending}
+                      >
+                        <Zap className="size-3.5" aria-hidden="true" />
+                        {t("association_table.bulk.test")}
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>
+                          {t("association_table.bulk.test_title", { count: selectedIds.length })}
+                        </AlertDialogTitle>
+                        <AlertDialogDescription>
+                          {t("association_table.bulk.test_desc", { count: selectedIds.length })}
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>{t("common:actions.cancel")}</AlertDialogCancel>
+                        <AlertDialogAction onClick={() => onBulkTest(selectedIds)}>
+                          {t("association_table.bulk.test_confirm")}
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                  {/* 补全元数据：0 价档位会被数据源价覆盖——这句必须出现在
+                      按下去之前，而不是事后报告里 */}
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button variant="outline" size="sm" className="h-7 text-xs" disabled={bulkPending}>
+                        {t("association_table.bulk.backfill")}
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>{t("association_table.bulk.backfill_title", { count: selectedIds.length })}</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          {t("association_table.bulk.backfill_desc")}
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>{t("common:actions.cancel")}</AlertDialogCancel>
+                        <AlertDialogAction onClick={() => onBackfill(selectedIds)}>
+                          {t("association_table.bulk.backfill_confirm")}
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                  <AlertDialog open={bulkDeleteOpen} onOpenChange={setBulkDeleteOpen}>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="destructive" size="sm" className="h-7 text-xs"
+                        disabled={bulkPending}
+                        onClick={() => setBulkDeleteOpen(true)}
+                      >
+                        <Trash2 className="size-3.5" aria-hidden="true" />
+                        {t("common:actions.delete")}
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>
+                          {t("association_table.bulk.delete_title", { count: selectedIds.length })}
+                        </AlertDialogTitle>
+                        <AlertDialogDescription asChild>
+                          <div className="space-y-2">
+                            <p>
+                              {t("association_table.bulk.delete_desc", { count: selectedIds.length })}
+                            </p>
+                            <div className="max-h-32 overflow-y-auto rounded-md border px-2 py-1 text-xs font-mono">
+                              {[...new Set(
+                                associations
+                                  .filter((a) => selectedIdSet.has(a.ID))
+                                  .map((a) => a.ProviderModel),
+                              )].map((name) => (
+                                <div key={name}>{name}</div>
+                              ))}
+                            </div>
+                            {selectedIds.length >= 5 && (
+                              <p className="text-xs text-muted-foreground">
+                                {t("association_table.bulk.delete_delay_hint")}
+                              </p>
+                            )}
+                          </div>
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel disabled={bulkPending}>
+                          {t("common:actions.cancel")}
+                        </AlertDialogCancel>
+                        <AlertDialogAction
+                          disabled={!confirmArmed || bulkPending}
+                          onClick={() => onBulkDelete(selectedIds)}
+                        >
+                          {t("common:actions.confirm_delete")}
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </>
+              )}
+            </div>
+          )}
           <div className="hidden sm:block flex-1 overflow-y-auto">
             <div className="w-full">
               <Table className="min-w-[1200px]">
                 <TableHeader className="z-10 sticky top-0 bg-secondary/80 text-secondary-foreground">
                   <TableRow>
+                    <TableHead className="w-10">
+                      <Checkbox
+                        checked={allVisibleSelected}
+                        onCheckedChange={onToggleSelectAll}
+                        aria-label={t("association_table.bulk.select_all")}
+                      />
+                    </TableHead>
                     <TableHead>{t("association_table.id")}</TableHead>
                     <TableHead>{t("association_table.provider_model")}</TableHead>
                     <TableHead>{t("association_table.type")}</TableHead>
@@ -190,6 +396,15 @@ export function AssociationList({
                     const statusBars = providerStatus[association.ID];
                     return (
                       <TableRow key={association.ID}>
+                        <TableCell className="w-10">
+                          <Checkbox
+                            checked={selectedIdSet.has(association.ID)}
+                            onCheckedChange={() => onToggleSelect(association.ID)}
+                            aria-label={t("association_table.bulk.select_row", {
+                              name: association.ProviderModel,
+                            })}
+                          />
+                        </TableCell>
                         <TableCell className="font-mono text-xs text-muted-foreground">{association.ID}</TableCell>
                         <TableCell className="max-w-[200px] truncate" title={association.ProviderModel}>
                           {association.ProviderModel}
@@ -200,7 +415,33 @@ export function AssociationList({
                         <TableCell>{capability(association.StructuredOutput)}</TableCell>
                         <TableCell>{capability(association.Image)}</TableCell>
                         <TableCell>{capability(association.WithHeader)}</TableCell>
-                        <TableCell>{association.Weight}</TableCell>
+                        <TableCell>
+                          {/* weight 行内快编：批量建完后微调权重不该每次都开
+                              15 字段的全量弹窗。双击进入编辑，Enter/失焦提交。 */}
+                          {editingWeightId === association.ID ? (
+                            <Input
+                              autoFocus
+                              type="number"
+                              min="1"
+                              className="h-7 w-16 text-xs"
+                              value={weightDraft}
+                              onChange={(e) => setWeightDraft(e.target.value)}
+                              onBlur={() => void commitWeightEdit(association)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") void commitWeightEdit(association)
+                                if (e.key === "Escape") setEditingWeightId(null)
+                              }}
+                            />
+                          ) : (
+                            <span
+                              className="cursor-text tabular-nums"
+                              title={t("association_table.weight_edit_hint")}
+                              onDoubleClick={() => startWeightEdit(association)}
+                            >
+                              {association.Weight}
+                            </span>
+                          )}
+                        </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2">
                             <Switch
