@@ -171,3 +171,63 @@ func TestInit_BackfillsModelWithProviderBackupToFalse(t *testing.T) {
 		t.Fatal("expected backup default to false")
 	}
 }
+
+// TestInit_DedupsAssociationsAndCreatesUniqueIndex：存量重复行清洗（每组
+// 留最小 id、软删其余）与 partial 唯一索引同在一条迁移链上。掉了任何一环，
+// 批量创建"撞索引转 skipped"与"删了再建"都会失去底座。
+func TestInit_DedupsAssociationsAndCreatesUniqueIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "llmio.db")
+
+	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open seed database: %v", err)
+	}
+	closeOnCleanup(t, db)
+	if err := db.AutoMigrate(&ModelWithProvider{}); err != nil {
+		t.Fatalf("failed to migrate associations: %v", err)
+	}
+
+	// 存量脏数据：同 (model, provider, provider_model) 两行 + 一行正常
+	seeds := []ModelWithProvider{
+		{ModelID: 1, ProviderID: 1, ProviderModel: "dup", Status: new(false)},
+		{ModelID: 1, ProviderID: 1, ProviderModel: "dup", Status: new(false)},
+		{ModelID: 1, ProviderID: 1, ProviderModel: "keep", Status: new(false)},
+	}
+	for i := range seeds {
+		seeds[i].ID = uint(i + 1)
+	}
+	// 显式主键批量插入：分着建，避免 GORM 把同结构体切片当一条批处理吞掉显式 ID
+	for i := range seeds {
+		if err := db.Create(&seeds[i]).Error; err != nil {
+			t.Fatalf("failed to seed row %d: %v", i, err)
+		}
+	}
+
+	Init(context.Background(), path)
+	closeOnCleanup(t, DB)
+
+	ctx := context.Background()
+
+	// 每组留最小 id：1 号存活，2 号被软删，3 号不动
+	var alive1, alive2, alive3 int64
+	DB.Model(&ModelWithProvider{}).Where("id = ?", 1).Count(&alive1)
+	DB.Model(&ModelWithProvider{}).Where("id = ?", 2).Count(&alive2)
+	DB.Model(&ModelWithProvider{}).Where("id = ?", 3).Count(&alive3)
+	if alive1 != 1 || alive2 != 0 || alive3 != 1 {
+		t.Fatalf("存活状态 id1=%d id2=%d id3=%d，期望 1/0/1（每组留最小 id）", alive1, alive2, alive3)
+	}
+
+	// 索引生效：重复三元组建不进去
+	err = DB.WithContext(ctx).Create(&ModelWithProvider{ModelID: 1, ProviderID: 1, ProviderModel: "dup", Status: new(false)}).Error
+	if err == nil {
+		t.Fatal("重复三元组应撞唯一索引被拒")
+	}
+
+	// partial：软删后同三元组可重建——"删了再建"不需要先物理清尸
+	if err := DB.WithContext(ctx).Delete(&ModelWithProvider{}, 3).Error; err != nil {
+		t.Fatalf("软删 3 号：%v", err)
+	}
+	if err := DB.WithContext(ctx).Create(&ModelWithProvider{ModelID: 1, ProviderID: 1, ProviderModel: "keep", Status: new(false)}).Error; err != nil {
+		t.Fatalf("软删后重建同三元组不该被索引拒绝：%v", err)
+	}
+}

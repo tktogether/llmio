@@ -117,6 +117,9 @@ func Init(ctx context.Context, path string) {
 	if _, err := gorm.G[ModelWithProvider](DB).Where("currency = '' OR currency IS NULL").Update(ctx, "currency", "CNY"); err != nil {
 		panic(err)
 	}
+	if err := ensureAssociationUniqueIndex(ctx); err != nil {
+		panic(err)
+	}
 
 	// `DB_VACUUM` 的启动期 VACUUM **搬去 service.PrepareStorage 了**（main 里、
 	// 监听端口之前调用）。搬家的理由是它原先 `panic(err)`，而且连磁盘够不够都
@@ -218,6 +221,47 @@ func ensureModelAutofillPolicyConfig(ctx context.Context) error {
 		Value: string(value),
 	}
 	return gorm.G[Config](DB).Create(ctx, &config)
+}
+
+// AssociationUniqueIndexSQL 是关联表唯一索引的建法。
+//
+// 放在 models 包里导出，是为了 handler 的测试库能建同一个索引——批量创建
+// 的"撞索引转 skipped"分支在测试里也要走到，两边各写一份 SQL 迟早漂移。
+//
+// partial（WHERE deleted_at IS NULL）：软删行不占名额，"删了再建"直接成立，
+// 不需要先物理清尸。
+const AssociationUniqueIndexSQL = `CREATE UNIQUE INDEX IF NOT EXISTS uniq_model_with_providers
+	ON model_with_providers (model_id, provider_id, provider_model)
+	WHERE deleted_at IS NULL`
+
+// ensureAssociationUniqueIndex 清洗存量重复行并建 (model_id, provider_id,
+// provider_model) 的唯一索引。
+//
+// 唯一索引是批量创建的幂等底座：服务端预查与插入之间的窗口里，两个并发
+// 批量不再能写出双份行（重复行不是无害的——splitWeightItems 按行累加权重，
+// 双份行等于同一上游双倍命中概率）。清洗先于建索引执行，且只留每组最小
+// id、软删其余——保留痕迹，也不占新索引的名额。
+func ensureAssociationUniqueIndex(ctx context.Context) error {
+	var dupIDs []int64
+	if err := DB.Model(&ModelWithProvider{}).
+		Where("deleted_at IS NULL AND id NOT IN (?)",
+			DB.Model(&ModelWithProvider{}).
+				Select("MIN(id)").
+				Where("deleted_at IS NULL").
+				Group("model_id, provider_id, provider_model"),
+		).
+		Pluck("id", &dupIDs).Error; err != nil {
+		return err
+	}
+	if len(dupIDs) > 0 {
+		slog.Warn("models: 发现并软删重复关联行", "count", len(dupIDs), "ids", dupIDs)
+		if err := DB.WithContext(ctx).
+			Where("id IN ?", dupIDs).
+			Delete(&ModelWithProvider{}).Error; err != nil {
+			return err
+		}
+	}
+	return DB.WithContext(ctx).Exec(AssociationUniqueIndexSQL).Error
 }
 
 // sqliteDSN 在库路径上追写驱动参数。
