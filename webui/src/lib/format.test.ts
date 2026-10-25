@@ -356,11 +356,19 @@ describe("formatCosts 双币成本展示", () => {
     expect(formatCosts(0, 0.5)).toBe("$0.5000")
   })
 
-  it("两种币都有金额时并列，各自带符号", () => {
+  it("两种币都有显著金额时并列，各自带符号", () => {
     expect(formatCosts(1.2, 0.5)).toBe("¥1.2000 + $0.5000")
   })
 
   it("金额都为零时按 CNY 显示零值，不说'没有'", () => {
     expect(formatCosts(0, 0)).toBe("¥0.0000")
+  })
+
+  it("不显著（显示为 0.0000）的尾数不并列，退化成单币", () => {
+    // 舍入阈值与 formatCost 的 toFixed(4) 一致：< 0.00005 即显示为 0.0000
+    expect(formatCosts(0.4746, 0.000036)).toBe("¥0.4746")
+    expect(formatCosts(0.000036, 0.5)).toBe("$0.5000")
+    // 恰好在阈值上算显著
+    expect(formatCosts(1.2, 0.00005)).toBe("¥1.2000 + $0.0001")
   })
 })

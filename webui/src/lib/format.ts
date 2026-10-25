@@ -67,13 +67,21 @@ export function formatCost(value: number, currency: string): string {
 }
 
 /**
- * 双币成本展示：只有一种币有金额时按单币显示；两种都有则并列
- * （"¥1.2000 + $0.5000"）。金额都为零时按 CNY 显示零值。
+ * 双币成本展示：两种币都有**显著**金额时并列（"¥1.2000 + $0.5000"），
+ * 否则按单币显示；都无显著金额时按 CNY 显示零值。
+ *
+ * "显著"按展示精度（四位小数）判定：舍入成 0.0000 的尾数（如混币部署里
+ * 一次 36 微美元的请求）并排出来只会显示 "$0.0000"，让人怀疑算错了。
  */
 export function formatCosts(cny: number, usd: number): string {
-  if (usd === 0) return formatCost(cny, "CNY")
-  if (cny === 0) return formatCost(usd, "USD")
-  return `${formatCost(cny, "CNY")} + ${formatCost(usd, "USD")}`
+  // 与 formatCost 的 toFixed(4) 同一舍入口径：< 0.00005 即显示为 0.0000
+  const cnySignificant = Math.abs(cny) >= 0.00005;
+  const usdSignificant = Math.abs(usd) >= 0.00005;
+  if (cnySignificant && usdSignificant) {
+    return `${formatCost(cny, "CNY")} + ${formatCost(usd, "USD")}`;
+  }
+  if (usdSignificant) return formatCost(usd, "USD");
+  return formatCost(cny, "CNY");
 }
 
 /** 币种符号，供图表轴用。 */

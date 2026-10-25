@@ -185,8 +185,17 @@ export function BatchAssociationDialog({
     return [...selectedPMs];
   }, [mode, sameNamePairs, selectedPMs]);
 
+  // 价格输入是否可解析（空串=合法的"留空"）。非法值（如 "-"、"1.2.3"）
+  // 不按住预览入口的话，Number() 会得到 NaN、JSON 序列化落 null——
+  // "手滑打了个半个数字"就这么静默变成"交给补全"，是最阴的误操作。
+  const priceInvalid =
+    [defaults.input_price, defaults.cache_read_price, defaults.output_price].some(
+      (v) => v.trim() !== "" && Number.isNaN(Number(v)),
+    );
+
   const buildRequest = (dryRun: boolean): BatchModelProviderRequest | null => {
     if (!providerId || effectiveModelIds.length === 0 || effectivePMs.length === 0) return null;
+    if (priceInvalid) return null;
     const price = (v: string) => (v.trim() === "" ? null : Number(v));
     const cap = (v: CapabilityTriState) => (v === "auto" ? null : v === "on");
     // 同名挂载走 pairs：恒等映射逐对建立。发 model_ids × provider_models
@@ -346,12 +355,14 @@ export function BatchAssociationDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pasteMode]);
 
-  // weight<1 会被后端整批 400，这里先按住预览入口
+  // weight<1 会被后端整批 400，这里先按住预览入口；价格非法同理
+  //（NaN→null 会把半成品输入静默变成"交给补全"）
   const canPreview =
     providerId > 0 &&
     effectiveModelIds.length > 0 &&
     effectivePMs.length > 0 &&
-    defaults.weight >= 1;
+    defaults.weight >= 1 &&
+    !priceInvalid;
 
   const reasonText = (reason: string) =>
     t(`batch_association.reasons.${reason}`, { defaultValue: reason });
@@ -650,6 +661,9 @@ export function BatchAssociationDialog({
             </div>
             <p className="text-[11px] text-muted-foreground">{t("batch_association.defaults_hint")}</p>
             <p className="text-[11px] text-muted-foreground">{t("batch_association.quota_hint")}</p>
+            {priceInvalid && (
+              <p className="text-[11px] text-status-critical-ink">{t("batch_association.price_invalid")}</p>
+            )}
             {defaults.backup && (
               <p className="text-[11px] text-status-critical-ink">{t("batch_association.all_backup_warning")}</p>
             )}

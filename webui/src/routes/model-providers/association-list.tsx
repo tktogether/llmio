@@ -404,7 +404,9 @@ export function AssociationList({
                             checked={selectedIdSet.has(association.ID)}
                             onCheckedChange={() => onToggleSelect(association.ID)}
                             aria-label={t("association_table.bulk.select_row", {
-                              name: association.ProviderModel,
+                              // 拼上提供商名：同名上游模型可来自多家提供商，
+                              // 光读模型名读屏分不出是哪一行
+                              name: `${association.ProviderModel} · ${provider?.Name ?? association.ProviderID}`,
                             })}
                           />
                         </TableCell>
