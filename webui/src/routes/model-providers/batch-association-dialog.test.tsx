@@ -88,10 +88,11 @@ describe("批量关联弹窗 · 同名挂载", () => {
 
     await waitFor(() => expect(mocked.batchCreate).toHaveBeenCalledTimes(1))
     const req = mocked.batchCreate.mock.calls[0][0]
-    // 只有能对上同名的进了提交，孤儿不进
+    // 只有能对上同名的进了提交（pairs 逐对），孤儿不进
     expect(req.dry_run).toBe(true)
-    expect(req.model_ids).toEqual([1])
-    expect(req.provider_models).toEqual(["gpt-test"])
+    expect(req.pairs).toEqual([{ model_id: 1, provider_model: "gpt-test" }])
+    expect(req.model_ids).toEqual([])
+    expect(req.provider_models).toEqual([])
   })
 
   it("预览→确认两步走：确认才真正写入，且请求体不带 dry_run", async () => {
@@ -154,5 +155,96 @@ describe("批量关联弹窗 · 粘贴兜底", () => {
     await user.click(screen.getByRole("button", { name: "回到列表" }))
     expect(screen.getAllByText("alpha").length).toBeGreaterThanOrEqual(1)
     expect(screen.getAllByText("beta").length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe("批量关联弹窗 · 同名挂载发 pairs（不是笛卡尔）", () => {
+  it("双选同名模型：请求是逐对 pairs，model_ids/provider_models 为空", async () => {
+    const user = userEvent.setup()
+    mocked.getProviderModels.mockResolvedValue([pm("gpt-test"), pm("claude-test")])
+    await openDialog(user)
+
+    await user.click(await screen.findByRole("checkbox", { name: /gpt-test/ }))
+    await user.click(screen.getByRole("checkbox", { name: /claude-test/ }))
+
+    mocked.batchCreate.mockResolvedValue({
+      dry_run: true, created: [], skipped: [], failed: [], unfilled: [],
+    })
+    await user.click(screen.getByRole("button", { name: "预览" }))
+
+    await waitFor(() => expect(mocked.batchCreate).toHaveBeenCalledTimes(1))
+    const req = mocked.batchCreate.mock.calls[0][0]
+    // N 个同名模型若发笛卡尔会建 N×N 条（N²−N 条交叉行）；pairs 逐对建立
+    expect(req.model_ids).toEqual([])
+    expect(req.provider_models).toEqual([])
+    // 映射列表按上游模型名排序，claude-test 在前
+    expect(req.pairs).toEqual([
+      { model_id: 2, provider_model: "claude-test" },
+      { model_id: 1, provider_model: "gpt-test" },
+    ])
+  })
+
+  it("预览后改配置，预览与确认入口一并失效（不留'改之前的答案'）", async () => {
+    const user = userEvent.setup()
+    mocked.getProviderModels.mockResolvedValue([pm("gpt-test")])
+    await openDialog(user)
+    await user.click(await screen.findByRole("checkbox", { name: /gpt-test/ }))
+
+    mocked.batchCreate.mockResolvedValue({
+      dry_run: true,
+      created: [{ ID: 0, ModelID: 1, ProviderModel: "gpt-test" } as never],
+      skipped: [], failed: [], unfilled: [],
+    })
+    await user.click(screen.getByRole("button", { name: "预览" }))
+    expect(await screen.findByText(/将新建 1 条/)).toBeInTheDocument()
+
+    // 改 weight：预览面板与"创建 N 条"按钮必须消失
+    const weight = screen.getByRole("spinbutton", { name: /权重/ })
+    await user.clear(weight)
+    await user.type(weight, "5")
+
+    await waitFor(() => expect(screen.queryByText(/将新建 1 条/)).not.toBeInTheDocument())
+    expect(screen.queryByRole("button", { name: /创建 1 条/ })).not.toBeInTheDocument()
+  })
+
+  it("失败重试从提交快照构造 pairs，不重算笛卡尔、不吃表单后续编辑", async () => {
+    const user = userEvent.setup()
+    mocked.getProviderModels.mockResolvedValue([pm("gpt-test")])
+    await openDialog(user)
+    await user.click(await screen.findByRole("checkbox", { name: /gpt-test/ }))
+
+    mocked.batchCreate.mockImplementation(async (req: { dry_run?: boolean }) => {
+      if (req.dry_run) {
+        return { dry_run: true, created: [{ ID: 0, ModelID: 1, ProviderModel: "gpt-test" } as never], skipped: [], failed: [], unfilled: [] }
+      }
+      return {
+        dry_run: false, created: [],
+        failed: [{ model_id: 1, provider_model: "gpt-test", reason: "db: boom" }],
+        skipped: [], unfilled: [],
+      }
+    })
+    await user.click(screen.getByRole("button", { name: "预览" }))
+    await user.click(await screen.findByRole("button", { name: /创建 1 条/ }))
+    expect(await screen.findByText(/db: boom/)).toBeInTheDocument()
+
+    // 提交后改 weight——重试请求仍应带提交时的 weight=1，且 pairs 精确等于失败对
+    const weight = screen.getByRole("spinbutton", { name: /权重/ })
+    await user.clear(weight)
+    await user.type(weight, "9")
+
+    mocked.batchCreate.mockResolvedValue({
+      dry_run: false, created: [{ ID: 8, ModelID: 1, ProviderModel: "gpt-test" } as never],
+      skipped: [], failed: [], unfilled: [],
+    })
+    await user.click(screen.getByRole("button", { name: /重试失败的 1 条/ }))
+
+    await waitFor(() => {
+      const calls = mocked.batchCreate.mock.calls
+      const retry = calls[calls.length - 1][0]
+      expect(retry.dry_run).toBe(false)
+      expect(retry.defaults.weight).toBe(1) // 快照，不是表单当前值
+      expect(retry.pairs).toEqual([{ model_id: 1, provider_model: "gpt-test" }])
+      expect(retry.model_ids).toEqual([])
+    })
   })
 })

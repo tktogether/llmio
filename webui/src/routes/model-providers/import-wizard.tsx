@@ -268,16 +268,17 @@ export function ImportWizard({
     if (!stepBResult || !providerId) return;
     setExecuting(true);
     try {
-      const failedModels = new Set(stepBResult.failed.map((f) => f.model_id));
-      const failedPMs = new Set(stepBResult.failed.map((f) => f.provider_model));
+      // 名字 → id 的映射必须把第一步新建的模型也算进来：它们还不在 models
+      // prop 里（页面要等弹窗关了才重拉），只查 modelByName 会全部落空，
+      // 重试就成了无声的空操作。
+      const idByName = new Map<string, number>([
+        ...[...modelByName].map(([name, m]) => [name, m.ID] as const),
+        ...stepAResult?.created.map((m) => [m.Name, m.ID] as const) ?? [],
+      ]);
       const pairs: { model_id: number; provider_model: string }[] = [];
-      for (const pm of classification.toCreate) {
-        const id = modelByName.get(pm)?.ID;
-        if (id && failedPMs.has(pm)) pairs.push({ model_id: id, provider_model: pm });
-      }
-      for (const pm of classification.toAttach) {
-        const id = modelByName.get(pm)?.ID;
-        if (id && failedPMs.has(pm) && failedModels.has(id)) pairs.push({ model_id: id, provider_model: pm });
+      for (const f of stepBResult.failed) {
+        const id = idByName.get(f.provider_model);
+        if (id && id === f.model_id) pairs.push({ model_id: id, provider_model: f.provider_model });
       }
       if (pairs.length === 0) return;
       const retried = await batchCreateModelProviders({
@@ -289,7 +290,11 @@ export function ImportWizard({
         created: [...stepBResult.created, ...retried.created],
         skipped: [...stepBResult.skipped, ...retried.skipped],
         failed: retried.failed,
-        unfilled: [...stepBResult.unfilled, ...retried.unfilled],
+        unfilled: [
+          ...new Map(
+            [...stepBResult.unfilled, ...retried.unfilled].map((u) => [`${u.provider_model}\u0000${u.reason}`, u] as const),
+          ).values(),
+        ],
       });
     } catch (err) {
       toast.error(t("import_wizard.exec_failed", { message: err instanceof Error ? err.message : String(err) }));
@@ -299,7 +304,13 @@ export function ImportWizard({
   };
 
   const handleClose = async () => {
-    if (stepAResult && stepAResult.created.length > 0) {
+    // attach-only 的导入没有新建模型，但关联数变了——只要第二步真的动过
+    // 行就通知页面重拉，否则总览卡片的关联计数停留在旧值。
+    const touched =
+      (stepAResult?.created.length ?? 0) > 0 ||
+      (stepBResult?.created.length ?? 0) > 0 ||
+      (stepBResult?.skipped.length ?? 0) > 0;
+    if (touched) {
       await onCompleted();
     }
     onOpenChange(false);
@@ -380,6 +391,7 @@ export function ImportWizard({
 
                   {pasteMode ? (
                     <textarea
+                      aria-label={t("batch_association.paste_placeholder")}
                       className="flex min-h-[120px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       value={pasteText}
                       onChange={(e) => applyPaste(e.target.value)}
@@ -468,7 +480,9 @@ export function ImportWizard({
                       </span>
                     </div>
                   ))}
-                {attachExisting && classification.toAttach.length > 0 && (
+                {/* 渲染条件不带 attachExisting：勾掉后这个 checkbox 就是唯一
+                    的再勾回入口，条件里带上它就成了单向门 */}
+                {classification.toAttach.length > 0 && (
                   <label className="flex items-center gap-2 px-3 py-2 text-xs border-t">
                     <Checkbox
                       checked={attachExisting}
@@ -561,7 +575,17 @@ export function ImportWizard({
             </Button>
           )}
           {step === 2 && (
-            <Button type="button" disabled={executing} onClick={() => void runImport()}>
+            <Button
+              type="button"
+              disabled={
+                executing ||
+                // 后端会把 <1 的数值整批打回（0 是"必超时/零重试"毒药），
+                // 这里先按住按钮，别让一次误击吞掉整批
+                modelDefaults.max_retry < 1 ||
+                modelDefaults.time_out < 1
+              }
+              onClick={() => void runImport()}
+            >
               {executing ? <Spinner className="size-4" /> : null}
               {t("import_wizard.import", { count: selectedPMs.size })}
             </Button>

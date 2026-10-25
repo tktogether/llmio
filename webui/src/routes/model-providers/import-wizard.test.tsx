@@ -152,3 +152,40 @@ describe("从供应商导入 · 两步编排", () => {
     expect(await screen.findByText(/元数据源尚未就绪/)).toBeInTheDocument()
   })
 })
+
+describe("从供应商导入 · attach 开关", () => {
+  it("取消勾选后：开关还在（可再勾回），导入不含已有同名模型的配对", async () => {
+    const user = userEvent.setup()
+    mocked.getProviderModels.mockResolvedValue([pm("gpt-test")])
+    mocked.batchCreateModelProviders.mockResolvedValue({
+      dry_run: true, created: [], skipped: [], failed: [], unfilled: [],
+    })
+    mocked.batchCreateModels.mockResolvedValue({ created: [], skipped: [] })
+    await openWizard(user)
+
+    await user.click(await screen.findByRole("checkbox", { name: /gpt-test/ }))
+    await user.click(screen.getByRole("button", { name: "下一步" }))
+
+    // 差异页出现 attach 开关；取消勾选后开关仍在（单向门修复）
+    const attachToggle = await screen.findByRole("checkbox")
+    await user.click(attachToggle)
+    expect(screen.getByRole("checkbox")).toBeInTheDocument()
+
+    mocked.batchCreateModelProviders.mockImplementation(async (req: unknown) => {
+      const r = req as { dry_run?: boolean }
+      if (r.dry_run) return { dry_run: true, created: [], skipped: [], failed: [], unfilled: [] }
+      return { dry_run: false, created: [], skipped: [], failed: [], unfilled: [] }
+    })
+    await user.click(screen.getByRole("button", { name: /导入 1 个/ }))
+
+    // 唯一一项是同名已有模型且被策略排除 → 第二步整体跳过：
+    // 不发真导入调用，直接进结果页
+    await waitFor(() => {
+      const realCalls = mocked.batchCreateModelProviders.mock.calls.filter(
+        ([req]) => !(req as { dry_run?: boolean }).dry_run,
+      )
+      expect(realCalls).toEqual([])
+    })
+    expect(await screen.findByText("导入结果")).toBeInTheDocument()
+  })
+})

@@ -586,8 +586,6 @@ export default function ModelProvidersPage() {
       setSelectedAssocIds([]);
       if (selectedModelId) {
         await fetchModelProviders(selectedModelId);
-      } else {
-        await refreshModelAssociationCount(selectedModelId ?? 0);
       }
     } catch (err) {
       toast.error(t("toast.bulk_delete_failed", { message: messageOf(err) }));
@@ -627,10 +625,9 @@ export default function ModelProvidersPage() {
       toast.success(t("toast.bulk_test_done", { ok, fail }));
       setSelectedAssocIds([]);
       if (selectedModelId) {
-        loadProviderStatus(
-          modelProviders.filter((a) => ids.includes(a.ID)),
-          selectedModelId,
-        );
+        // 传全量：loadProviderStatus 是整体替换，只传被测子集会让其余行
+        // 的近况条永远转圈（缺键的语义是"还在取"）
+        loadProviderStatus(modelProviders, selectedModelId);
       }
     } finally {
       setBulkTestProgress(null);

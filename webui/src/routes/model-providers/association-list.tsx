@@ -151,6 +151,9 @@ export function AssociationList({
   }
 
   const commitWeightEdit = async (association: ModelWithProvider) => {
+    // Enter 提交后 unmount、blur 可能不再派发，但历史行为有分歧——入口
+    // 守卫挡住第二次调用（行数据尚未回填时会重复 PUT）
+    if (editingWeightId !== association.ID) return
     setEditingWeightId(null)
     const parsed = parseInt(weightDraft, 10)
     if (Number.isNaN(parsed) || parsed < 1 || parsed === association.Weight) return
@@ -357,7 +360,7 @@ export function AssociationList({
                   <TableRow>
                     <TableHead className="w-10">
                       <Checkbox
-                        checked={allVisibleSelected}
+                        checked={allVisibleSelected ? true : selectedIds.length > 0 ? "indeterminate" : false}
                         onCheckedChange={onToggleSelectAll}
                         aria-label={t("association_table.bulk.select_all")}
                       />
@@ -448,7 +451,7 @@ export function AssociationList({
                               checked={isAssociationEnabled}
                               disabled={!!statusUpdating[association.ID]}
                               onCheckedChange={(value) => onStatusToggle(association, value)}
-                              aria-label="切换启用状态"
+                              aria-label={t("association_table.toggle_status")}
                             />
                             <span className="text-xs text-muted-foreground">
                               {isAssociationEnabled ? t("association_table.active") : t("association_table.inactive")}

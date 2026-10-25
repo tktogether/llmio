@@ -99,6 +99,8 @@ export function BatchAssociationDialog({
   const [submitting, setSubmitting] = useState(false);
   /** 预览对应的提交体快照：确认时原样重放，避免"预览的是 A、提交的是 B" */
   const pendingRef = useRef<BatchModelProviderRequest | null>(null);
+  /** 最近一次**真实提交**的请求体：重试从它过滤，不吃表单后续编辑 */
+  const lastSubmitRef = useRef<BatchModelProviderRequest | null>(null);
 
   // 打开时重置；锁定模型时默认选中它
   useEffect(() => {
@@ -111,6 +113,7 @@ export function BatchAssociationDialog({
     setPreview(null);
     setResult(null);
     pendingRef.current = null;
+    lastSubmitRef.current = null;
     setPmSearch("");
     setModelSearch("");
     setManualName("");
@@ -123,6 +126,13 @@ export function BatchAssociationDialog({
       void loadProviderModels(providerId);
     }
   }, [open, providerId, loadProviderModels]);
+
+  // 预览随表单失效：任何进请求体的状态变了，旧预览就成了"改之前的答案"，
+  // 确认按钮必须跟着消失——否则点确认提交的是旧配置（对照条款预览的同一纪律）。
+  useEffect(() => {
+    setPreview(null);
+    pendingRef.current = null;
+  }, [mode, selectedPMs, selectedModelIds, defaults]);
 
   const providerModels = useMemo(
     () => (providerId ? providerModelsMap[providerId] || [] : []),
@@ -179,10 +189,19 @@ export function BatchAssociationDialog({
     if (!providerId || effectiveModelIds.length === 0 || effectivePMs.length === 0) return null;
     const price = (v: string) => (v.trim() === "" ? null : Number(v));
     const cap = (v: CapabilityTriState) => (v === "auto" ? null : v === "on");
+    // 同名挂载走 pairs：恒等映射逐对建立。发 model_ids × provider_models
+    // 会被服务端笛卡尔展开——N 个同名模型建出 N×N 条、其中 N²−N 条交叉行。
+    const pairs =
+      mode === "same-name"
+        ? sameNamePairs
+            .filter((p) => p.model)
+            .map((p) => ({ model_id: p.model!.ID, provider_model: p.pm }))
+        : undefined;
     return {
-      model_ids: effectiveModelIds,
+      model_ids: pairs ? [] : effectiveModelIds,
       provider_id: providerId,
-      provider_models: effectivePMs,
+      provider_models: pairs ? [] : effectivePMs,
+      ...(pairs ? { pairs } : {}),
       defaults: {
         weight: defaults.weight,
         with_header: defaults.with_header,
@@ -208,6 +227,9 @@ export function BatchAssociationDialog({
       setResult(res);
       setPreview(null);
       pendingRef.current = null;
+      // 重试的基底是"这次真正提交了什么"，不是表单当前的样子——结果面板
+      // 在场时表单仍可编辑，现场重建会带着与首批不一致的配置落库。
+      lastSubmitRef.current = req;
     }
     return res;
   };
@@ -239,31 +261,36 @@ export function BatchAssociationDialog({
     }
   };
 
-  /** 只重交失败子集：skip_existing 幂等保证已建行不会被重复创建 */
+  /** 只重交失败子集：失败项本身就是精确的 (model_id, provider_model) 对，
+   *  直接以 pairs 形态重发——不重算笛卡尔，也不带表单后续的改动。 */
   const handleRetryFailed = async () => {
     if (!result || result.failed.length === 0) return;
-    const failedModels = new Set(result.failed.map((f) => f.model_id));
-    const failedPMs = new Set(result.failed.map((f) => f.provider_model));
-    const base = pendingRef.current ?? buildRequest(false);
+    const base = lastSubmitRef.current;
     if (!base) return;
     const req: BatchModelProviderRequest = {
       ...base,
       dry_run: false,
-      model_ids: base.model_ids.filter((id) => failedModels.has(id)),
-      provider_models: base.provider_models.filter((pm) => failedPMs.has(pm)),
+      model_ids: [],
+      provider_models: [],
+      pairs: result.failed.map((f) => ({ model_id: f.model_id, provider_model: f.provider_model })),
     };
     setSubmitting(true);
     try {
       const retried = await batchCreateModelProviders(req);
-      // 合并：重试那部分的结果替换掉旧的 failed，其余原样保留
+      // 合并：重试那部分的结果替换掉旧的 failed，其余原样保留；
+      // unfilled 按 pm+reason 去重（跨重试同一原因不重复刷屏）
       setResult({
         dry_run: false,
         created: [...result.created, ...retried.created],
         skipped: [...result.skipped, ...retried.skipped],
         failed: retried.failed,
-        unfilled: [...result.unfilled, ...retried.unfilled],
+        unfilled: [
+          ...new Map(
+            [...result.unfilled, ...retried.unfilled].map((u) => [`${u.provider_model}\u0000${u.reason}`, u]),
+          ).values(),
+        ],
       });
-      pendingRef.current = req;
+      lastSubmitRef.current = req;
     } catch (err) {
       toast.error(t("batch_association.submit_failed", { message: err instanceof Error ? err.message : String(err) }));
     } finally {
@@ -319,7 +346,12 @@ export function BatchAssociationDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pasteMode]);
 
-  const canPreview = providerId > 0 && effectiveModelIds.length > 0 && effectivePMs.length > 0;
+  // weight<1 会被后端整批 400，这里先按住预览入口
+  const canPreview =
+    providerId > 0 &&
+    effectiveModelIds.length > 0 &&
+    effectivePMs.length > 0 &&
+    defaults.weight >= 1;
 
   const reasonText = (reason: string) =>
     t(`batch_association.reasons.${reason}`, { defaultValue: reason });
@@ -395,6 +427,7 @@ export function BatchAssociationDialog({
 
               {pasteMode ? (
                 <textarea
+                  aria-label={t("batch_association.paste_placeholder")}
                   className="flex min-h-[120px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   value={pasteText}
                   onChange={(e) => applyPaste(e.target.value)}
@@ -551,6 +584,7 @@ export function BatchAssociationDialog({
                 <Label>{t("association_form.weight")}</Label>
                 <Input
                   type="number" min="1" className="h-8 text-xs"
+                  aria-label={t("association_form.weight")}
                   value={defaults.weight}
                   onChange={(e) => setDefaults((d) => ({ ...d, weight: parseInt(e.target.value) || 0 }))}
                 />
