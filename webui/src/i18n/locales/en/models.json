@@ -244,6 +244,7 @@
     "bulk_status_failed": "Bulk status update failed: {{message}}",
     "bulk_delete_done": "Bulk deleted {{count}} associations",
     "bulk_delete_failed": "Bulk delete failed: {{message}}",
+    "bulk_disable_warning": "After disabling, these models will have no enabled associations, yet they still appear in the client /v1/models list and calls will fail:\n{{models}}\n\nDisable anyway?",
     "bulk_test_done": "Bulk test finished: {{ok}} ok, {{fail}} failed",
     "weight_save_failed": "Failed to save weight: {{message}}",
     "backfill_done": "Backfill done: filled {{filled}}, unchanged {{unchanged}}, unmatched {{unfilled}}",
@@ -291,6 +292,7 @@
     "defaults_hint": "Fields left empty are auto-filled from metadata (unfillable ones fall back to defaults and are reported); anything you enter is used as-is, including 0.",
     "quota_hint": "Multiple associations on the same provider share its quota and failure domain: attaching N rows multiplies the blast radius by N, not the capacity.",
     "all_backup_warning": "Every association in this batch is backup: if a target model has no primary associations, all traffic goes to the backup pool.",
+    "price_invalid": "Price input cannot be parsed. Fix it and retry (leave blank to autofill).",
     "preview_title": "Preview (not written)",
     "preview_counts": "{{create}} to create, {{skip}} existing will be skipped",
     "non_same_name_note": "This includes non-same-name combinations (logical name ≠ upstream name); make sure that is intended.",
@@ -344,6 +346,9 @@
     "result_title": "Import result",
     "models_created": "{{count}} logical models created",
     "exec_failed": "Import failed: {{message}}",
+    "breaker_advice_title": "After attaching, these models will have more primary associations than their retry limit while the breaker is off:",
+    "breaker_advice_item": "{{name}}: {{count}} primary associations > {{maxRetry}} retries",
+    "breaker_advice_hint": "A primary pool that retries can never exhaust means backup associations will never take over; enabling the breaker lets failed associations leave the pool quickly (toggle in Edit Model).",
     "backfill_hint": "(use \"Fill metadata\" in the list toolbar once ready)"
   }
 }

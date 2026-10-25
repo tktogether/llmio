@@ -244,6 +244,7 @@
     "bulk_status_failed": "批次啟停失敗：{{message}}",
     "bulk_delete_done": "已批次刪除 {{count}} 條關聯",
     "bulk_delete_failed": "批次刪除失敗：{{message}}",
+    "bulk_disable_warning": "停用後，以下模型將沒有任何啟用關聯，但它們仍會出現在用戶端 /v1/models 清單，調用將失敗：\n{{models}}\n\n確定停用？",
     "bulk_test_done": "批次測試完成：成功 {{ok}} 條，失敗 {{fail}} 條",
     "weight_save_failed": "權重儲存失敗：{{message}}",
     "backfill_done": "補全完成：補填 {{filled}} 條，無需變更 {{unchanged}} 條，未命中 {{unfilled}} 條",
@@ -291,6 +292,7 @@
     "defaults_hint": "留空的項交給元資料自動補全（補不了的落預設值並在結果裡報告）；填了就一律按填的來，包括 0。",
     "quota_hint": "同一家供應商的多條關聯共享其配額與故障域：批次掛 N 條是故障半徑 ×N，不是容量 ×N。",
     "all_backup_warning": "本次建立的全部是備用關聯：若目標模型沒有主關聯，所有請求都會走備用池。",
+    "price_invalid": "價格輸入無法解析，請修正後重試（留空表示交給自動補全）。",
     "preview_title": "預覽（未寫入）",
     "preview_counts": "將新建 {{create}} 條，跳過已存在 {{skip}} 條",
     "non_same_name_note": "其中包含非同名組合（邏輯模型名 ≠ 上游模型名），請確認這不是誤選。",
@@ -344,6 +346,9 @@
     "result_title": "匯入結果",
     "models_created": "已新建 {{count}} 個邏輯模型",
     "exec_failed": "匯入失敗：{{message}}",
+    "breaker_advice_title": "掛到已有模型後，以下模型的主關聯數將超過重試次數限制，且未開啟熔斷：",
+    "breaker_advice_item": "{{name}}：主關聯 {{count}} 條 > 重試 {{maxRetry}} 次",
+    "breaker_advice_hint": "重試耗不盡的主池意味著備用關聯永遠不會接管；給模型開啟熔斷可以讓故障關聯快速出池（模型表「編輯模型」裡勾選）。",
     "backfill_hint": "（就緒後可用清單工具列的「補全元資料」）"
   }
 }
