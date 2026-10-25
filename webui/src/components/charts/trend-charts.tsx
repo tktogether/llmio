@@ -19,7 +19,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart"
-import { bucketLabelFormatter, compactNumber, currencySymbol, formatCost } from "@/lib/format"
+import { bucketLabelFormatter, compactNumber } from "@/lib/format"
 import { seriesVar } from "@/lib/palette"
 import type { TrendPoint } from "@/lib/api"
 
@@ -177,13 +177,24 @@ export function TokenTrendChart({ data }: { data: TrendPoint[] }) {
  * 0.01 量级，默认的 toLocaleString 会把它显示成 0.052 这种丢精度的整数段。
  * 单系列 + dot 指示器时时间 label 渲染在行外，formatter 替换行内容不影响它。
  */
-export function CostTrendChart({ data, currency }: { data: TrendPoint[]; currency: string }) {
+export function CostTrendChart({ data }: { data: TrendPoint[] }) {
   const { t } = useTranslation("home")
   const label = useMemo(() => bucketLabelFormatter(data), [data])
 
+  // 双币分列：两种币各有金额时画两条线，图例区分；只有一种时退化为单线。
+  // 混币叠加成一条线等于把不同量纲的数加起来画——数值口径上不成立。
+  const hasCNY = data.some((d) => d.costCNY > 0)
+  const hasUSD = data.some((d) => d.costUSD > 0)
+  const showCNY = hasCNY || !hasUSD
+  const showUSD = hasUSD
+
   const config = {
-    cost: { label: t("trend.cost"), color: seriesVar(4) },
+    ...(showCNY ? { costCNY: { label: t("trend.cost_cny"), color: seriesVar(4) } } : {}),
+    ...(showUSD ? { costUSD: { label: t("trend.cost_usd"), color: seriesVar(6) } } : {}),
   } satisfies ChartConfig
+
+  // 轴不带币种符号：双币时没有单一单位，量纲由各系列图例各自声明
+  const symbolOf = (name: string) => (name === t("trend.cost_usd") ? "$" : "¥")
 
   return (
     <ChartContainer config={config} className="aspect-auto h-[220px] w-full">
@@ -201,7 +212,7 @@ export function CostTrendChart({ data, currency }: { data: TrendPoint[]; currenc
           tickLine={false}
           axisLine={false}
           width={44}
-          tickFormatter={(v: number) => `${currencySymbol(currency)}${compactNumber(v)}`}
+          tickFormatter={(v: number) => compactNumber(v)}
         />
         <ChartTooltip
           content={
@@ -211,12 +222,18 @@ export function CostTrendChart({ data, currency }: { data: TrendPoint[]; currenc
                 <>
                   <div
                     className="h-2.5 w-2.5 shrink-0 rounded-[2px]"
-                    style={{ background: "var(--color-cost)" }}
+                    style={{
+                      background:
+                        name === t("trend.cost_usd")
+                          ? "var(--color-costUSD)"
+                          : "var(--color-costCNY)",
+                    }}
                   />
                   <div className="flex flex-1 items-center justify-between leading-none">
                     <span className="text-muted-foreground">{name}</span>
                     <span className="text-foreground font-mono font-medium tabular-nums">
-                      {formatCost(Number(value), currency)}
+                      {symbolOf(String(name))}
+                      {Number(value).toFixed(4)}
                     </span>
                   </div>
                 </>
@@ -224,14 +241,26 @@ export function CostTrendChart({ data, currency }: { data: TrendPoint[]; currenc
             />
           }
         />
-        <Area
-          type="monotone"
-          dataKey="cost"
-          stroke="var(--color-cost)"
-          fill="var(--color-cost)"
-          fillOpacity={0.1}
-          strokeWidth={2}
-        />
+        {showCNY && (
+          <Area
+            type="monotone"
+            dataKey="costCNY"
+            stroke="var(--color-costCNY)"
+            fill="var(--color-costCNY)"
+            fillOpacity={0.1}
+            strokeWidth={2}
+          />
+        )}
+        {showUSD && (
+          <Area
+            type="monotone"
+            dataKey="costUSD"
+            stroke="var(--color-costUSD)"
+            fill="var(--color-costUSD)"
+            fillOpacity={0.1}
+            strokeWidth={2}
+          />
+        )}
       </AreaChart>
     </ChartContainer>
   )

@@ -48,13 +48,13 @@ function stats(over: Partial<StatsResult> = {}): StatsResult {
       totalTokens: 1500,
       cachedTokens: 250,
       cacheHitRate: 25,
-      cost: 0.12,
-      currency: "CNY",
+      costCNY: 0.12,
+      costUSD: 0,
       totalRetries: 2,
       avgRetries: 0.2,
     },
     trend: [
-      { ts: 1_699_000_000_000, total: 10, success: 9, error: 1, running: 0, tokens: 1500, prompt: 1000, completion: 500, cached: 250, cost: 0.05, avgTps: 40, avgFirstChunkMs: 1200 },
+      { ts: 1_699_000_000_000, total: 10, success: 9, error: 1, running: 0, tokens: 1500, prompt: 1000, completion: 500, cached: 250, costCNY: 0.05, costUSD: 0, avgTps: 40, avgFirstChunkMs: 1200 },
     ],
     byModel: [group("deepseek-chat")],
     byModelProvider: [],
@@ -96,7 +96,8 @@ function group(name: string): GroupStat {
     p95FirstChunkMs: 3000,
     avgProxyMs: 1500,
     retries: 2,
-    cost: 0.12,
+    costCNY: 0.12,
+    costUSD: 0,
   }
 }
 
@@ -147,6 +148,7 @@ function failedLog(over: Partial<ChatLog> = {}): ChatLog {
     ProviderModel: "claude-sonnet-4",
     ProviderName: "openai",
     Status: "error",
+    currency: "CNY",
     Style: "openai",
     UserAgent: "claude-cli/2.1",
     Error: "upstream unavailable: connection reset by peer",
@@ -165,7 +167,6 @@ function failedLog(over: Partial<ChatLog> = {}): ChatLog {
     input_price: 0,
     cache_read_price: 0,
     output_price: 0,
-    currency: "CNY",
     ...over,
   }
 }

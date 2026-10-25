@@ -625,8 +625,9 @@ export interface StatsKPI {
   totalTokens: number;
   cachedTokens: number;
   cacheHitRate: number;
-  cost: number;
-  currency: string;
+  /** 成本按行币种分列（混币部署的总成本分开读，量纲才成立）；空/未知币种归 CNY */
+  costCNY: number;
+  costUSD: number;
   totalRetries: number;
   /** 平均每请求重试次数。不是比率——该值可以大于 1 */
   avgRetries: number;
@@ -644,8 +645,9 @@ export interface TrendPoint {
   completion: number;
   /** prompt 中命中缓存的部分，供 Token 构成图拆出"非缓存输入" */
   cached: number;
-  /** 桶成本，口径同 kpi.cost（三档价快照计价），单位由 kpi.currency 决定 */
-  cost: number;
+  /** 桶成本按行币种分列，口径同 kpi.costCNY */
+  costCNY: number;
+  costUSD: number;
   avgTps: number;
   avgFirstChunkMs: number;
 }
@@ -678,7 +680,9 @@ export interface GroupStat {
   p95FirstChunkMs: number;
   avgProxyMs: number;
   retries: number;
-  cost: number;
+  /** 桶成本按行币种分列，口径同 kpi.costCNY */
+  costCNY: number;
+  costUSD: number;
 }
 
 export interface ErrorSample {

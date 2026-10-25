@@ -64,7 +64,8 @@ function group(over: Partial<GroupStat> = {}): GroupStat {
     p95FirstChunkMs: 0,
     avgProxyMs: 0,
     retries: 0,
-    cost: 0,
+    costCNY: 0,
+    costUSD: 0,
     ...over,
   }
 }
@@ -558,8 +559,8 @@ describe("模型性能排序", () => {
 
   it("任何列都能排（以成本与重试为例）", () => {
     const gs = [
-      group({ name: "cheap", cost: 0.1, retries: 5 }),
-      group({ name: "pricey", cost: 9, retries: 1 }),
+      group({ name: "cheap", costCNY: 0.1, retries: 5 }),
+      group({ name: "pricey", costCNY: 9, retries: 1 }),
     ]
     expect(names(gs, { key: "cost", dir: "desc" })).toEqual(["pricey", "cheap"])
     expect(names(gs, { key: "retries", dir: "asc" })).toEqual(["pricey", "cheap"])

@@ -46,16 +46,7 @@ import {
   type ModelSort,
   type ModelSortKey,
 } from "@/lib/analytics"
-import {
-  bucketLabelFormatter,
-  compactNumber,
-  formatCost,
-  formatDurationMs,
-  formatNumber,
-  formatPercent,
-  formatSeconds,
-  formatTps,
-} from "@/lib/format"
+import { bucketLabelFormatter, compactNumber, formatCosts, formatDurationMs, formatNumber, formatPercent, formatSeconds, formatTps } from "@/lib/format"
 import type { ErrorGroup, GroupStat, StatsResult, StatsLogRow } from "@/lib/api"
 
 // ---------------------------------------------------------------------------
@@ -581,8 +572,8 @@ function sharePercent(count: number, total: number): string {
  * 且可按任意一列排序。数字全部取自服务端算好的 `GroupStat`
  * （均值只统计成功请求、p95 为最近秩），前端只排序与呈现，不重新聚合。
  *
- * 成本列必须带上 `kpi.currency`：`formatCost` 没有默认币种，漏传会把金额
- * 显示成没有符号的裸数字，读者分不清是美元还是人民币。
+ * 成本列双币分列：桶金额自带币种（CNY/USD 各自成立），两种都有时并列
+ * 显示——混币桶"加成一个数、贴一个标签"在量纲上不成立。
  */
 export function ModelsView({
   stats,
@@ -599,7 +590,6 @@ export function ModelsView({
 }) {
   const { t } = useTranslation("analytics")
   const groups = modelDimensionGroups(stats, dimension)
-  const currency = stats.kpi.currency
 
   /**
    * 维度切换。
@@ -676,7 +666,7 @@ export function ModelsView({
       <TableCell className="reading text-right">{formatDurationMs(g.avgFirstChunkMs)}</TableCell>
       <TableCell className="reading text-right">{formatDurationMs(g.p95FirstChunkMs)}</TableCell>
       <TableCell className="reading text-right">{formatNumber(g.retries)}</TableCell>
-      <TableCell className="reading text-right">{formatCost(g.cost, currency)}</TableCell>
+      <TableCell className="reading text-right">{formatCosts(g.costCNY, g.costUSD)}</TableCell>
       <TableCell className="reading text-right">{formatNumber(g.totalTokens)}</TableCell>
     </TableRow>
   )

@@ -66,6 +66,16 @@ export function formatCost(value: number, currency: string): string {
   return symbol ? `${symbol}${num}` : `${num} ${currency || ""}`.trim()
 }
 
+/**
+ * 双币成本展示：只有一种币有金额时按单币显示；两种都有则并列
+ * （"¥1.2000 + $0.5000"）。金额都为零时按 CNY 显示零值。
+ */
+export function formatCosts(cny: number, usd: number): string {
+  if (usd === 0) return formatCost(cny, "CNY")
+  if (cny === 0) return formatCost(usd, "USD")
+  return `${formatCost(cny, "CNY")} + ${formatCost(usd, "USD")}`
+}
+
 /** 币种符号，供图表轴用。 */
 export function currencySymbol(currency: string): string {
   if (currency === "USD") return "$"
