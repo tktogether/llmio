@@ -236,6 +236,23 @@ vitest 1106、build 通过、e2e 五套（batch 5/5、backup_scale 2/2、backup 
 6. 批量测试完成后"近况"列不反映测试结果（2026-10-26 外部审查 N3 记录）：近况条读的是聊天日志统计（`/model-providers/status` → 最近 N 条该关联的真实请求），连通性测试（`/test/:id`）刻意不写聊天日志——两边口径不同是存量设计，测试只发请求不留痕。触发条件——若后续把测试结果独立落表，再在此列呈现。
 7. 批量停用守卫用框架内 AlertDialog（2026-10-26 外部审查 Y1 实现记录）：守卫只在"选中将清空某模型全部启用关联"这一少数场景出现；第一版用 `window.confirm`，但原生弹窗被 window 接管——与应用对话框语言脱节，嵌入式 webview 里无法样式化也无法可靠测试（复验时被自动放行），改为 AlertDialog 呈现风险模型清单。
 
+### 2026-10-26 追修：Go 覆盖率门禁在 CI 上红灯
+
+CI 的「Go 覆盖率门禁」步骤在 `f227ec5` / `a0bb994` / `7494b9e` 三个提交上连续失败。
+失败点不是阈值（引入本追修前本地实测全仓 74.4%，阈值 70%），而是门禁步骤里跑的
+`TestBatchCreateConcurrentDuplicateClassified`：4 个并发请求里，撞唯一索引的输家
+被报成 skipped，用例却要求 `skip_existing=false` 时报 failed(exists)。
+
+根因：`f693259` 的提交信息写了「事务内撞唯一索引按 skip_existing 分流」，但该
+提交的 diff 只落了测试与另外三项修复，分类分支从未进代码——`isUniqueViolation`
+分支恒写 skipped。于是用例红绿取决于竞态落在"预查已存在"还是"插入撞索引"哪条
+路径上（本地常绿、CI 常红）。
+
+追修：`handler/batch_model_providers.go` 的 unique violation 分支按 skipExisting
+分流（true 维持 skipped 并回读现状；false 记 failed(exists)），测试补一条
+「`skip_existing=false` 下不许出现 skipped」的显式断言。验证：该用例 `-count=100`
+全绿、`go test ./...` 全绿、覆盖率 74.4%。
+
 ## 九、方案红队评审记录与决策日志（v2 改写依据）
 
 三轮红队（①操作风险/UX 4P0·7P1·4P2；②数据与 API 契约 3P0·5P1·2P2；③调度与上游品味 4P0·4P1·2P2），关键处置：
