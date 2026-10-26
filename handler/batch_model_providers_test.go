@@ -653,6 +653,11 @@ func TestBatchCreateConcurrentDuplicateClassified(t *testing.T) {
 		if o.code != http.StatusOK {
 			t.Fatalf("并发批量都应 200，实得 code=%d", o.code)
 		}
+		// skip_existing=false 的契约：已存在一律算失败，插入竞态也不能
+		// 例外地被吞成 skipped——这条不钉住，分类路径就会随调度抖动。
+		if len(o.skipped) != 0 {
+			t.Errorf("skip_existing=false 下不该出现 skipped，实得 %+v", o.skipped)
+		}
 		totalCreated += o.created
 		for _, f := range o.failed {
 			if f.Reason == "exists" {

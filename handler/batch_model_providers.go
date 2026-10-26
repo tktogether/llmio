@@ -145,7 +145,8 @@ type BatchCreateResponse struct {
 // BatchCreateModelProviders 批量创建关联。
 //
 // 失败语义按 model_id 分组：一个模型一个事务，事务内单条失败不影响
-// 同模型其它行（唯一索引冲突归入 skipped，其它错误归入 failed），
+// 同模型其它行（唯一索引冲突按调用方的 skip_existing 分流：默认归入
+// skipped，显式 false 归入 failed(exists)；其它错误归入 failed），
 // 事务整体失败则该模型名下的待建行全部转 failed。
 func BatchCreateModelProviders(c *gin.Context) {
 	var req BatchModelProviderRequest
@@ -247,11 +248,17 @@ func BatchCreateModelProviders(c *gin.Context) {
 				if err := tx.Create(&toCreate[i]).Error; err != nil {
 					if isUniqueViolation(err) {
 						// 并发下撞唯一索引：另一个请求刚建了同一条。它的落库
-						// 与本事务无关，按 skip 报告并补读当前状态。
-						resp.Skipped = append(resp.Skipped, BatchSkippedItem{
-							ModelID: modelID, ProviderModel: toCreate[i].ProviderModel, Reason: "exists",
-							ExistingStatus: existingStatusOf(ctx, modelID, req.ProviderID, toCreate[i].ProviderModel),
-						})
+						// 与本事务无关，报告语义跟调用方的 skip_existing 走：
+						// 默认 skip 并补读当前状态；显式要求「已存在算失败」时
+						// 不能静默吞成 skipped，否则调用方分不清"没做"与"做了"。
+						if skipExisting {
+							resp.Skipped = append(resp.Skipped, BatchSkippedItem{
+								ModelID: modelID, ProviderModel: toCreate[i].ProviderModel, Reason: "exists",
+								ExistingStatus: existingStatusOf(ctx, modelID, req.ProviderID, toCreate[i].ProviderModel),
+							})
+						} else {
+							resp.Failed = append(resp.Failed, BatchFailedItem{modelID, toCreate[i].ProviderModel, "exists"})
+						}
 						continue
 					}
 					resp.Failed = append(resp.Failed, BatchFailedItem{modelID, toCreate[i].ProviderModel, "db: " + err.Error()})
