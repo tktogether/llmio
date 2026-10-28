@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,9 @@ func resetDBStatsCache() {
 	dbStatsMu.Lock()
 	defer dbStatsMu.Unlock()
 	dbStatsCache, dbStatsAt = nil, time.Time{}
+	// 索引就绪标志也是包级的：上一个用例建了索引，这个用例可能正是要验
+	// 没有索引时的退路。默认从"没索引"起跑，要用索引的用例自己 Ensure。
+	dbStatsIndexesReady.Store(false)
 }
 
 func TestDBStats_ReadsTheRealNumbersAndCaches(t *testing.T) {
@@ -213,6 +217,177 @@ func TestDBStats_CallersGetTheirOwnCopy(t *testing.T) {
 	if second.Stale || second.Rows == 999 {
 		t.Fatal("缓存被调用方改掉了")
 	}
+}
+
+// 两条全表聚合必须**只读索引**——这是线上那条 `context deadline exceeded`
+// 的修复落点，所以这里盯三件事：
+//
+//  1. 建索引之后，真正发出去的 SQL 的计划里就是那两条表达式索引。
+//  2. 走索引量出来的数与退路（全表扫）逐项相等，不是"快了但数错了"。
+//  3. 两条索引都是表达式索引（含 partial 条件），不会被同名但定义不同的
+//     存量索引顶替掉——那种顶替不会报错，只会让读静默退回全表扫。
+func TestDBStats_EnsureIndexesPointsAggregatesAtIndexes(t *testing.T) {
+	setupLogCompressTestDB(t)
+	resetDBStatsCache()
+	ctx := context.Background()
+
+	if err := EnsureDBStatsIndexes(ctx); err != nil {
+		t.Fatalf("建索引失败：%v", err)
+	}
+	if !dbStatsIndexesReady.Load() {
+		t.Fatal("索引建成了，就绪标志却没置上——读会白白退回全表扫")
+	}
+
+	rowQ, groupQ := dbStatsQueries()
+	if plan := queryPlan(t, ctx, rowQ); !strings.Contains(plan, dbStatsChatIOIndexName) {
+		t.Fatalf("chat_ios 聚合没走 %s，计划是：%s", dbStatsChatIOIndexName, plan)
+	}
+	if plan := queryPlan(t, ctx, groupQ); !strings.Contains(plan, "USING COVERING INDEX "+dbStatsGroupLenIndexName) {
+		t.Fatalf("block_groups 聚合没走覆盖索引 %s，计划是：%s", dbStatsGroupLenIndexName, plan)
+	}
+
+	// 可重复调用：第二次不该再动任何东西，更不该报错。
+	if err := EnsureDBStatsIndexes(ctx); err != nil {
+		t.Fatalf("第二次建索引应当是无操作，实得 %v", err)
+	}
+}
+
+// 同一个库、同一批数据：走索引与走退路必须量出**一模一样**的数。
+//
+// 表达式索引由 SQLite 自己维护，理论上不会错；但它错的时候是"数悄悄变了"，
+// 而状态页的这组数正是迁移进度的唯一读数——比慢更可怕。
+func TestDBStats_IndexBackedNumbersMatchFallback(t *testing.T) {
+	setupLogCompressTestDB(t)
+	resetDBStatsCache()
+	ctx := context.Background()
+
+	ids := seedPlaintextRows(t, ctx, [][]byte{bigRow(1, 8<<10), bigRow(2, 8<<10), bigRow(3, 8<<10)}, time.Hour)
+	if _, err := RunLogCompress(ctx, false); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+	// 造出"请求体已压、响应体还是明文"的中间态，让 pending 与 framed 同时非零。
+	writeRawColumn(t, ctx, ids[0], "of_string", "响应体明文")
+
+	fallback := ReadDBStats(ctx)
+	if fallback == nil {
+		t.Fatal("退路量不到数")
+	}
+
+	dbStatsMu.Lock()
+	dbStatsAt = time.Time{}
+	dbStatsMu.Unlock()
+	if err := EnsureDBStatsIndexes(ctx); err != nil {
+		t.Fatalf("建索引失败：%v", err)
+	}
+	indexed := ReadDBStats(ctx)
+	if indexed == nil {
+		t.Fatal("走索引量不到数")
+	}
+	for name, pair := range map[string][2]int64{
+		"行数":    {fallback.Rows, indexed.Rows},
+		"待迁移行数": {fallback.PendingRows, indexed.PendingRows},
+		"已压行数":  {fallback.FramedRows, indexed.FramedRows},
+		"块行数":   {fallback.BlockRows, indexed.BlockRows},
+		"组行数":   {fallback.GroupRows, indexed.GroupRows},
+		"组字节数":  {fallback.GroupBytes, indexed.GroupBytes},
+	} {
+		if pair[0] != pair[1] {
+			t.Fatalf("%s：退路 %d，走索引 %d——两条路的数必须相同", name, pair[0], pair[1])
+		}
+	}
+	if indexed.FramedRows == 0 || indexed.PendingRows == 0 {
+		t.Fatalf("语料没造出中间态（pending=%d framed=%d），这条用例什么也没验",
+			indexed.PendingRows, indexed.FramedRows)
+	}
+
+	// 索引要跟着**三种写**一起维护，否则界面上那个数会一直停在建索引那一刻。
+	seedPlaintextRows(t, ctx, [][]byte{[]byte("新来的一行")}, time.Hour)
+	writeRawColumn(t, ctx, ids[1], "of_string", "又一条明文")
+	// 软删：partial 索引的 WHERE 条件正是这一列，删掉的行必须从索引里消失。
+	if err := models.DB.WithContext(ctx).Exec(
+		`UPDATE chat_ios SET deleted_at = ? WHERE id = ?`, time.Now(), ids[2]).Error; err != nil {
+		t.Fatalf("软删失败：%v", err)
+	}
+
+	dbStatsMu.Lock()
+	dbStatsAt = time.Time{}
+	dbStatsMu.Unlock()
+	after := ReadDBStats(ctx)
+	if after == nil {
+		t.Fatal("写入之后量不到数")
+	}
+	if after.Rows != indexed.Rows {
+		// 3 行 + 新增 1 行 - 软删 1 行 = 3 行：与原来相等，所以单独钉住它。
+		t.Fatalf("rows=%d，期望 %d（插一行、软删一行）", after.Rows, indexed.Rows)
+	}
+	if after.PendingRows != indexed.PendingRows+2 {
+		t.Fatalf("pending=%d，期望 %d（新增一行 + 一列翻回明文）", after.PendingRows, indexed.PendingRows+2)
+	}
+}
+
+// 同名但定义不对的存量索引必须被换掉。
+//
+// `CREATE INDEX IF NOT EXISTS` 只看名字：一条 `idx_chat_ios_forms(log_id)`
+// 会让建索引"成功"，而读继续全表扫——没有报错、没有慢日志，
+// 只有 6 秒预算再次被吃光。这里先造出这种错索引再 Ensure。
+func TestDBStats_EnsureIndexesRepairsWrongDefinition(t *testing.T) {
+	setupLogCompressTestDB(t)
+	resetDBStatsCache()
+	ctx := context.Background()
+
+	wrong := []string{
+		`CREATE INDEX idx_chat_ios_forms ON chat_ios (log_id)`,
+		`CREATE INDEX idx_block_groups_len ON block_groups (raw_len)`,
+	}
+	for _, s := range wrong {
+		if err := models.DB.WithContext(ctx).Exec(s).Error; err != nil {
+			t.Fatalf("造错索引失败：%v", err)
+		}
+	}
+	if ok, err := dbStatsIndexMatches(ctx, dbStatsChatIOIndexName, "chat_ios", 3, true); err != nil || ok {
+		t.Fatalf("前置：错索引不该被判为合格（ok=%v err=%v）", ok, err)
+	}
+
+	if err := EnsureDBStatsIndexes(ctx); err != nil {
+		t.Fatalf("修索引失败：%v", err)
+	}
+	for _, spec := range dbStatsIndexSpecs {
+		ok, err := dbStatsIndexMatches(ctx, spec.name, spec.table, spec.columns, spec.partial)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatalf("%s 没有被换成表达式索引——读会静默退回全表扫", spec.name)
+		}
+	}
+	// 换成真的表达式索引之后，计划里必须见到它。
+	rowQ, _ := dbStatsQueries()
+	if plan := queryPlan(t, ctx, rowQ); !strings.Contains(plan, dbStatsChatIOIndexName) {
+		t.Fatalf("修完之后计划仍然不对：%s", plan)
+	}
+}
+
+// queryPlan 把 `EXPLAIN QUERY PLAN` 的每一步拼成一行，供断言。
+func queryPlan(t *testing.T, ctx context.Context, q string) string {
+	t.Helper()
+	rows, err := models.DB.WithContext(ctx).Raw("EXPLAIN QUERY PLAN " + q).Rows()
+	if err != nil {
+		t.Fatalf("EXPLAIN 失败：%v", err)
+	}
+	defer rows.Close()
+	var steps []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("读计划失败：%v", err)
+		}
+		steps = append(steps, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("读计划失败：%v", err)
+	}
+	return strings.Join(steps, " | ")
 }
 
 // codedErr 造一个带 SQLite 错误码的 error，形状与驱动一致（*Error 有 Code()）。

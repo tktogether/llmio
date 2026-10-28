@@ -58,6 +58,14 @@ func main() {
 	// 默认两个开关都是关的，所以常态下这一句只是读一次 pragma。
 	service.PrepareStorage(context.Background())
 
+	// 状态页量库用的两条表达式索引。**放在监听端口之前**，与上面那句同理：
+	// 建索引持写锁，第一次还要在真机上扫一遍表（真机形状副本冷跑约 3 秒），
+	// 放到监听之后就是在途请求撞 busy_timeout。失败只记日志——索引没建上
+	// 只是状态页退回全表扫描，不该让服务起不来。
+	if err := service.EnsureDBStatsIndexes(context.Background()); err != nil {
+		slog.Error("db stats 索引没建上（状态页量库将退回全表扫描）", "error", err)
+	}
+
 	// 策略类配置的种子：缺行时落默认值。**必须排在三个调度器之前**——
 	// 它们第一次读策略时如果还没有那一行，就要打一条 `record not found`，
 	// 而这三个调度是按周期读的，噪音会一直刷。见 models.EnsureConfigIfMissing。
