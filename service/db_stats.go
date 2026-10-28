@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,24 +10,34 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/atopos31/llmio/models"
 )
 
-// 本文件量"库的现状"，供状态页使用。两条规矩都是真机打出来的：
+// 本文件量"库的现状"，供状态页使用。三条规矩都是真机打出来的：
 //
 //  1. **它不许失败。** 状态页在迁移期间每 2 秒轮询一次，而迁移正在写同一张表。
 //     原先这里一撞锁就 `InternalServerError`，前端整块报错、用户得手动刷新；
 //     更要命的是"开始迁移"那个动作**也走这条读**（只为了拿一个文件大小去做备份
 //     校验），于是撞一次锁连迁移都起不来——实测反馈就是这个形状。
 //  2. **它不许每次轮询都扫全表。** 这一组数里最难的是全表聚合（`pending_rows`
-//     要扫整表 typeof，真库 1 854 000 页）。挂个 2 秒轮询、每次都真扫，
-//     等于自己给自己制造锁竞争——读越慢，下一次撞锁的概率越高。
-//     由此派生出一条硬规矩：**这一句里只许出现 `typeof`**。它读记录头、
-//     不读载荷；任何 `length()` / `列 <> ''` 都要把载荷读出来，成正比于字节数
-//     （实测 1.36 GiB 要 0.80 秒），而这条路径在真机上一次 4.24 秒的长读
-//     就足以把整站打成 500——`journal_mode=delete` 下读事务挡写。
+//     要扫整表 typeof）。挂个 2 秒轮询、每次都真扫，等于自己给自己制造锁竞争
+//     ——读越慢，下一次撞锁的概率越高。由此派生出一条硬规矩：**这一句里只许
+//     出现 `typeof`**。它读记录头、不读载荷；任何 `length()` / `列 <> ''` 都要
+//     把载荷读出来，成正比于字节数（实测 1.36 GiB 要 0.80 秒），而这条路径在
+//     真机上一次 4.24 秒的长读就足以把整站打成 500——`journal_mode=delete` 下
+//     读事务挡写。
+//  3. **"只读 typeof"还不够，绝对耗时也得在毫秒级。** 上面两条只保证了"不读
+//     载荷"，而全表 typeof 仍要顺序读完 200 MB 的页。真机形状的副本上冷缓存
+//     实测：chat_ios 聚合 1.45 秒 + block_groups 聚合 1.59 秒 = 2.82 秒；
+//     生产磁盘更慢，6 秒预算被吃光——线上那条 `context deadline exceeded`
+//     就是这么来的，而且**与维护任务无关**：服务空闲、已经跑了一天，任意时刻
+//     触发一次真读都会超时。ctx 到期还停不住扫描（驱动让语句跑完再返回
+//     ctx.Err()），那 6 秒里读事务一直握着，而这正是第 2 条要避免的事。
+//     所以状态页要的两个全表聚合改成**只读索引**（见 EnsureDBStatsIndexes）：
+//     同一条读在冷副本上 2.82 秒 → 0.14 秒。
 //
 // 所以：常数级的那部分（pragma、文件大小）每次真读；全表聚合那部分带 TTL。
 // runtime 里没有"半真半假"的选项，两者失效原因是同一个（撞锁），
@@ -103,8 +114,10 @@ type DBStats struct {
 	// freelist、别的东西都算进去了。阶段 6 想修的那个"界面少报 1.4 GiB"，
 	// 至此是由 file_size 直接回答的。
 	//
-	// 分块的字节（GroupBytes）留着：`block_groups` 是张小表（真机 57 MiB / 891 行），
-	// 聚合它 0.03 秒，而且它没有别的口径能替代。
+	// 分块的字节（GroupBytes）留着：`block_groups` 的行数很少（真机 46 768 行），
+	// 而它没有别的口径能替代。但它的载荷很大（真机 910 MB，全在溢出页里），
+	// 所以这一项靠 `idx_block_groups_len` 这条表达式索引回答——
+	// `count(*)` 与 `sum(length(data))` 都只读索引，不碰载荷。
 
 	// StatsAt 是这组数字量出来的时刻（unix 毫秒）。前端据此说明"数据截至"。
 	StatsAt int64 `json:"stats_at"`
@@ -125,6 +138,14 @@ func ReadDBStats(ctx context.Context) *DBStats {
 		return s
 	}
 
+	// 维护任务在写库时也照读，不设"维护期不量"的退路。
+	//
+	// 曾经有过一条这样的守卫，理由是"这条读是两次全表扫描，任务写库时更慢"。
+	// 但线上回执推翻了它：**服务空闲、已经跑了一天，任意时刻都会超时**——
+	// 根因是读本身的绝对耗时，不是与写竞争。守卫既没修掉那条 WARN，又让
+	// 界面在一趟几十分钟的迁移里停止更新（迁移期间恰恰是最需要看进度的时候）。
+	// 现在读只碰索引、0.14 秒量级，撞锁交给下面的重试与 stale 退路。
+	//
 	// 同一瞬间可能有好几个轮询进来（多标签页、或上一次还没回来）。
 	// 抢不到就别排队——直接拿上一次的：为一个已经迟到的数再等 5 秒不值得。
 	if !dbStatsMu.TryLock() {
@@ -197,6 +218,162 @@ func DBFileSize() (int64, error) {
 		return 0, err
 	}
 	return info.Size(), nil
+}
+
+// 状态页两条全表聚合各自的索引。
+//
+// 两者都是**表达式索引**，理由一样：这两条读要的不是"某一列的值"，而是
+// "对每一行算一个函数"（typeof / length）。普通列索引回答不了这种问题，
+// 规划器只能扫表；把函数本身做成索引键，聚合就退化成一趟索引扫描。
+//
+//   - idx_chat_ios_forms 建在 `deleted_at IS NULL` 上（partial）：行数统计
+//     只数没被软删的行，索引用同一个条件就只装 live 行，比整表小。
+//   - idx_block_groups_len 不是 partial：块组不可变、也没有删除路径
+//     （见 models/block.go 的 insertBlockGroups），整表就是全集。
+//
+// **规划器不会自动选 partial 索引**：它的成本估算看不到 partial 索引实际的
+// 行数（只按条件比例猜），在这份语料上估出来的代价反而高于那条"看起来能用"
+// 的 idx_chat_ios_deleted_at。所以读的时候必须 `INDEXED BY` 点名（见
+// dbStatsQueries）；也正因为它不是自动选的，索引没建上时必须退回不带提示
+// 的写法——`INDEXED BY` 遇到不存在的索引会直接报 `no such index`。
+const (
+	dbStatsChatIOIndexName = "idx_chat_ios_forms"
+	dbStatsChatIOIndexSQL  = `CREATE INDEX IF NOT EXISTS idx_chat_ios_forms
+		ON chat_ios (typeof(input), typeof(of_string), typeof(of_string_array))
+		WHERE deleted_at IS NULL`
+
+	dbStatsGroupLenIndexName = "idx_block_groups_len"
+	dbStatsGroupLenIndexSQL  = `CREATE INDEX IF NOT EXISTS idx_block_groups_len
+		ON block_groups (length(data))`
+)
+
+// dbStatsIndexSpecs 是这两条索引应当长成的样子：表、列数、是否 partial。
+//
+// 只查名字不够——同名但定义不同的索引（例如早先手工建的普通列索引）会被
+// `CREATE INDEX IF NOT EXISTS` 当成"已存在"直接放行，于是读继续全表扫，
+// 而且没有任何告警。这与 EnsureChatIOLogIDIndex 的判断是同一条理由，只是
+// 这里要核对的是"每一列都是表达式"（`PRAGMA index_info` 里表达式列的
+// name 是 NULL，cid 是 -2）。
+var dbStatsIndexSpecs = []struct {
+	name    string
+	table   string
+	sql     string
+	columns int
+	partial bool
+}{
+	{dbStatsChatIOIndexName, "chat_ios", dbStatsChatIOIndexSQL, 3, true},
+	{dbStatsGroupLenIndexName, "block_groups", dbStatsGroupLenIndexSQL, 1, false},
+}
+
+// dbStatsIndexesReady 表示两条索引都已就位，读可以用 INDEXED BY 点名它们。
+// 由 EnsureDBStatsIndexes 置真；没置真时 readDBStatsOnce 走不带提示的写法。
+var dbStatsIndexesReady atomic.Bool
+
+// EnsureDBStatsIndexes 给状态页的两条全表聚合建索引。可重复调用。
+//
+// **为什么它必须在启动路径上。** 这条读的代价是它自己的问题，不是维护期的
+// 问题：线上回执是"服务空闲、已经跑了一天，任意时刻都会 `context deadline
+// exceeded`"。没有索引时一次真读 2.82 秒（真机形状副本、冷缓存），生产磁盘
+// 更慢，6 秒预算被吃光；而状态页每 5 秒就真读一次，等于常态自造一次长读
+// 事务——`journal_mode=delete` 下读挡写。建索引是一次启动期成本（同一份
+// 副本冷跑：1.42 秒 + 1.45 秒，占 1.5 MiB + 0.5 MiB），换来常态每次读
+// 0.14 秒。
+//
+// **失败只记日志**（由调用方记）：索引没建上只是退回原来的慢读，与建之前
+// 的线上行为一致，不会产生新的错误形态。建索引期间持写锁；调用点在监听
+// 端口之前，与 EnsureChatIOLogIDIndex、service.PrepareStorage 是同一条
+// 时序前提（此刻没有在途请求）。
+func EnsureDBStatsIndexes(ctx context.Context) error {
+	for _, spec := range dbStatsIndexSpecs {
+		ok, err := dbStatsIndexMatches(ctx, spec.name, spec.table, spec.columns, spec.partial)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		// 走到这里只有两种情况：索引不存在，或同名但定义不对。后者必须删掉
+		// 重建——`CREATE INDEX IF NOT EXISTS` 遇到同名索引会直接跳过。
+		if err := models.DB.WithContext(ctx).Exec("DROP INDEX IF EXISTS " + spec.name).Error; err != nil {
+			return err
+		}
+		if err := models.DB.WithContext(ctx).Exec(spec.sql).Error; err != nil {
+			return err
+		}
+	}
+	dbStatsIndexesReady.Store(true)
+	return nil
+}
+
+// dbStatsIndexMatches 判断既有索引是不是我们要的那条：名字对、列数对、
+// 每一列都是表达式、partial 标记对。
+func dbStatsIndexMatches(ctx context.Context, name, table string, columns int, partial bool) (bool, error) {
+	var indexes []struct {
+		Name    string
+		Partial int
+	}
+	if err := models.DB.WithContext(ctx).Raw("PRAGMA index_list('" + table + "')").Scan(&indexes).Error; err != nil {
+		return false, err
+	}
+	for _, idx := range indexes {
+		if idx.Name != name {
+			continue
+		}
+		if (idx.Partial != 0) != partial {
+			return false, nil
+		}
+		var cols []struct {
+			Name sql.NullString
+		}
+		if err := models.DB.WithContext(ctx).Raw("PRAGMA index_info('" + name + "')").Scan(&cols).Error; err != nil {
+			return false, err
+		}
+		if len(cols) != columns {
+			return false, nil
+		}
+		for _, c := range cols {
+			if c.Name.Valid {
+				return false, nil // 普通列索引，不是表达式索引
+			}
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// dbStatsQueries 返回两条全表聚合要发出去的 SQL。
+//
+// 抽成函数是为了让用例能对**真正发出去的那一句**做 `EXPLAIN QUERY PLAN`：
+// 在用例里另抄一份的话，改了这个函数不会让任何用例变红，而"计划悄悄退化
+// 成全表扫"正是这里最容易复发的事。
+//
+// 索引就位时：
+//
+//   - chat_ios 用 `INDEXED BY idx_chat_ios_forms` 点名。这一个索引里同时有
+//     partial 条件（deleted_at IS NULL）、三列的 typeof 和 rowid，`count(*)`
+//     与两个 CASE 求和全都能在索引里数完，一个载荷页都不碰。
+//   - block_groups 用 `INDEXED BY idx_block_groups_len` 点名。规划器在这条
+//     聚合上本来就会自己选这个覆盖索引，点名是为了让计划不随统计信息漂移。
+//
+// 索引没就位时（建索引失败，或有人手工删了它）退回不带提示的写法——因为
+// `INDEXED BY` 遇到不存在的索引会直接报 `no such index`，那会把整条读打死。
+// 退路里 chat_ios 用 `NOT INDEXED`：规划器默认挑的 idx_chat_ios_deleted_at
+// 里没有 typeof，每一行都要按 rowid 回表——软删极少，它等于随机读整表；
+// 全表顺序扫是这条读的下限（实测 1.40 秒 vs 1.45 秒），退路取它。
+func dbStatsQueries() (rowQ, groupQ string) {
+	rowSource := " NOT INDEXED"
+	groupSuffix := ""
+	if dbStatsIndexesReady.Load() {
+		rowSource = " INDEXED BY " + dbStatsChatIOIndexName
+		groupSuffix = " INDEXED BY " + dbStatsGroupLenIndexName
+	}
+	rowQ = fmt.Sprintf(`
+		SELECT count(*),
+		       COALESCE(sum(CASE WHEN %s THEN 1 ELSE 0 END), 0),
+		       COALESCE(sum(CASE WHEN %s THEN 1 ELSE 0 END), 0)
+		FROM chat_ios%s WHERE deleted_at IS NULL`, plaintextFilter, framedFilter, rowSource)
+	groupQ = `SELECT count(*), COALESCE(sum(length(data)), 0) FROM block_groups` + groupSuffix
+	return rowQ, groupQ
 }
 
 func readDBStatsWithRetry(ctx context.Context) (*DBStats, error) {
@@ -283,11 +460,7 @@ func readDBStatsOnce(ctx context.Context) (*DBStats, error) {
 	//
 	// 判据能瘦成纯 `typeof`，靠的是那条不变量：这三列里 **TEXT 只表示非空明文**
 	// （空值一律 NULL），详细推导见 log_compress.go 六个判据常量上面那段。
-	rowQ := fmt.Sprintf(`
-		SELECT count(*),
-		       COALESCE(sum(CASE WHEN %s THEN 1 ELSE 0 END), 0),
-		       COALESCE(sum(CASE WHEN %s THEN 1 ELSE 0 END), 0)
-		FROM chat_ios WHERE deleted_at IS NULL`, plaintextFilter, framedFilter)
+	rowQ, groupQ := dbStatsQueries()
 	if err := models.DB.WithContext(ctx).Raw(rowQ).
 		Row().Scan(&stats.Rows, &stats.PendingRows, &stats.FramedRows); err != nil {
 		return nil, err
@@ -299,8 +472,9 @@ func readDBStatsOnce(ctx context.Context) (*DBStats, error) {
 		Row().Scan(&stats.BlockRows); err != nil {
 		return nil, err
 	}
-	if err := models.DB.WithContext(ctx).Raw(
-		`SELECT count(*), COALESCE(sum(length(data)), 0) FROM block_groups`).
+	// `length(data)` 是表达式索引 idx_block_groups_len 的键，查询形状见
+	// dbStatsQueries。
+	if err := models.DB.WithContext(ctx).Raw(groupQ).
 		Row().Scan(&stats.GroupRows, &stats.GroupBytes); err != nil {
 		return nil, err
 	}
