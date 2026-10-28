@@ -43,7 +43,7 @@ gh api repos/atopos31/llmio/rulesets
 
 | 分支 | 所在仓库 | 职责 | 写入规则 |
 |---|---|---|---|
-| `master` | fork | 上游镜像 | 只允许 `git merge --ff-only upstream/master`。唯一例外是 `beta.yml` 及 beta 部署相关提交 |
+| `master` | fork | 上游镜像 | 只允许合并 `upstream/master`，以及 `beta.yml` 等 fork 专属 CI 提交。因存在这些提交，与上游分叉后无法快进，使用普通 merge |
 | `beta` | fork | 本 fork 的功能发布线 | 只从功能分支或同步分支合并。push 即构建镜像并部署 |
 | `fix/*`、`feat/*`（送上游） | fork | 单个上游改动 | 从 `upstream/master` 切出。不得包含 `beta.yml` 或透传代码 |
 | `feat/*`、`fix/*`（fork 专有） | fork | 透传等功能 | 从 `origin/beta` 切出。PR 目标为 `beta` |
@@ -113,9 +113,11 @@ PR 的 `test` 检查通过后自行合并。合并方式使用 merge commit，�
 ```bash
 git push origin --delete fix/<描述>
 git switch master
-git merge --ff-only upstream/master
+git merge upstream/master    # 不能用 --ff-only：master 上有 beta.yml 等 fork 提交
 git push origin master
 ```
+
+`master` 每次跟随上游前进都会产生一个 merge commit，这是预期行为，不要为了保持直线历史而 rebase 或 force-push。
 
 ### 4.2 fork 专有功能
 
