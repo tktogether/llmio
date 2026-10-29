@@ -262,6 +262,9 @@ func TestClassifyError(t *testing.T) {
 		{name: "重试耗尽", in: `All retry failed, trace ID: abc123`, wantCode: "exhausted", wantType: "重试耗尽"},
 		{name: "业务错误样本", in: `response matched provider error sample "quota"`, wantCode: "upstream-body", wantType: "上游业务错误"},
 		{name: "超时", in: `context deadline exceeded`, wantCode: "timeout", wantType: "超时"},
+		// 等响应头超时自成一类：处置与普通超时不同（调 TimeOut 还是查连接）
+		{name: "响应头超时（h2）", in: `[upstream_request] Post "https://api.commandcode.ai/x": http2: timeout awaiting response headers (stream=true, header_timeout=20s, conn=reused)`, wantCode: "header-timeout", wantType: "响应头超时"},
+		{name: "响应头超时（h1）", in: `Post "https://x": net/http: timeout awaiting response headers`, wantCode: "header-timeout", wantType: "响应头超时"},
 		// 客户端断开必须排在"重试耗尽"之前：cancel 收尾的错误常带 All retry failed
 		// 外壳，根因是对端先跑了，不能归成重试耗尽
 		{name: "客户端断开（裸 cancel）", in: `context canceled`, wantCode: "client-cancel", wantType: "客户端断开"},

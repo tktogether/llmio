@@ -382,8 +382,15 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 				default:
 				}
 
+				// 连接观测要赶在建请求之前挂到 ctx 上，起点也在这里取：
+				// 失败时才分得清"把生效超时耗满了"和"立刻就挂了"
+				// 取证上下文逐次重建：自愈会改写 log.Retry，重建才能和落库那行对得上
+				attempt := NewUpstreamAttempt(log, before.Stream, providersWithMeta.TimeOut, responseHeaderTimeout)
+				connFacts := &ConnFacts{}
+				attemptStart := time.Now()
+
 				// 每次都重建请求：删参改的是 rawBody，BuildReq 必须带着新字节重打
-				req, err := chatModel.BuildReq(ctx, headers, modelWithProvider.ProviderModel, rawBody)
+				req, err := chatModel.BuildReq(TraceConn(ctx, connFacts), headers, modelWithProvider.ProviderModel, rawBody)
 				if err != nil {
 					fail(err)
 					// 构建请求失败 移除待选
@@ -397,7 +404,9 @@ func BalanceChat(ctx context.Context, start time.Time, style string, before Befo
 					// client.Do 失败常常是裸的 "context canceled"：客户端一断开，绑定在
 					// 请求 ctx 上的上游调用会被一并取消。打上阶段与归因后再落库，
 					// 否则日志里只剩下六个字母，看不出是客户端跑了还是上游没连上。
-					fail(MarkStage(StageUpstreamRequest, ctx, err))
+					// 控制台一行取证 + 库里补三要素，见 upstream_diag.go
+					attempt.Report(ctx, err, time.Since(attemptStart), connFacts)
+					fail(MarkStage(StageUpstreamRequest, ctx, attempt.Annotate(err, connFacts)))
 					// 请求失败 移除待选
 					balancer.Delete(id)
 					nextProvider = true
