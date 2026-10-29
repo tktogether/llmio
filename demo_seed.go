@@ -162,7 +162,7 @@ func demoSeedAll(ctx context.Context, tx *gorm.DB) error {
 			DisplayOrder: 2,
 		},
 		{
-			Name: "claude-3-5-sonnet", Remark: "演示用视觉模型：双上游、顺序轮询",
+			Name: "claude-3-5-sonnet", Remark: "演示用视觉模型：四条主上游同权（批量关联建出的典型形态）、顺序轮询",
 			MaxRetry: 1, TimeOut: 90,
 			Strategy: consts.BalancerRotor, Breaker: new(false), PreferDirect: new(true),
 			DisplayOrder: 1,
@@ -214,6 +214,20 @@ func demoSeedAll(ctx context.Context, tx *gorm.DB) error {
 			Weight: 1, ToolCall: new(true), StructuredOutput: new(false), Image: new(true),
 			WithHeader: new(false), Status: new(true),
 			Currency: "CNY", InputPrice: new(3.0), CacheReadPrice: new(1.5), OutputPrice: new(15.0),
+		},
+		// 后两条与上一条同权：模拟「批量关联 · 同名挂载」一次建出的形态——
+		// 批量建出来的关联默认权重相同，页面上要看得见这种"一片同权"的样子。
+		{
+			ModelID: modelsList[1].ID, ProviderID: providers[1].ID, ProviderModel: "claude-sonnet-4-5",
+			Weight: 1, ToolCall: new(true), StructuredOutput: new(true), Image: new(true),
+			WithHeader: new(false), Status: new(true),
+			Currency: "CNY", InputPrice: new(2.8), CacheReadPrice: new(0.7), OutputPrice: new(14.0),
+		},
+		{
+			ModelID: modelsList[1].ID, ProviderID: providers[2].ID, ProviderModel: "gemini-2.5-flash",
+			Weight: 1, ToolCall: new(true), StructuredOutput: new(false), Image: new(true),
+			WithHeader: new(false), Status: new(true),
+			Currency: "CNY", InputPrice: new(0.15), CacheReadPrice: new(0.075), OutputPrice: new(0.6),
 		},
 	}
 	if err := tx.Create(&assoc).Error; err != nil {

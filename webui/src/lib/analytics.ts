@@ -534,14 +534,24 @@ export function nextModelSort(current: ModelSort, key: ModelSortKey): ModelSort 
 export function sortModelGroups(groups: GroupStat[], sort: ModelSort): GroupStat[] {
   const { key, dir } = sort
   return [...groups].sort((a, b) => {
-    const av = a[key]
-    const bv = b[key]
+    const av = modelSortValue(a, key)
+    const bv = modelSortValue(b, key)
     const aMissing = isMissingModelMetric(key, av)
     const bMissing = isMissingModelMetric(key, bv)
     if (aMissing !== bMissing) return aMissing ? 1 : -1
     if (!aMissing && av !== bv) return dir === "asc" ? av - bv : bv - av
     return compareName(a.name, b.name)
   })
+}
+
+/**
+ * 排序取值。`cost` 是唯一的虚拟键：桶金额已按币种分列，排序只声明次序、
+ * 不呈现总额，因此取两桶之和近似定序（主币种金额主导次序）；单元格展示
+ * 仍走 `formatCosts` 双币分列，不会把两个数字加起来给人看。
+ */
+function modelSortValue(g: GroupStat, key: ModelSortKey): number {
+  if (key === "cost") return g.costCNY + g.costUSD
+  return g[key] as number
 }
 
 /** 名称定序：相等返回 0，否则按码点。无 locale 依赖，任何机器结果一致。 */

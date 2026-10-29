@@ -449,8 +449,9 @@ func TestStatsGranularitiesHandler(t *testing.T) {
 func TestStatsFilterJSONTagsUnchanged(t *testing.T) {
 	t.Parallel()
 
-	// 这些是聚合响应里前端直接消费的字段名
-	want := []string{"total", "success", "successRate", "promptTokens", "cost", "currency"}
+	// 这些是聚合响应里前端直接消费的字段名。成本自币种分列（54098ad）起
+	// 是 costCNY/costUSD 两个键，currency 已删除——别把旧名单改回来。
+	want := []string{"total", "success", "successRate", "promptTokens", "costCNY", "costUSD"}
 	b, err := json.Marshal(service.KPI{})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

@@ -42,7 +42,9 @@
     "running": "In flight",
     "input": "Uncached input",
     "cached": "Cache read",
-    "output": "Output"
+    "output": "Output",
+    "cost_cny": "Cost (¥)",
+    "cost_usd": "Cost ($)"
   },
   "latency": {
     "title": "First-chunk distribution",

@@ -41,7 +41,7 @@ import {
   type AuthKeyItem,
   type StatsResult,
 } from "@/lib/api"
-import { compactNumber, formatCost, formatNumber, formatPercent } from "@/lib/format"
+import { compactNumber, formatCosts, formatNumber, formatPercent } from "@/lib/format"
 
 /**
  * 判断一个错误是不是"请求被主动取消"。
@@ -574,9 +574,9 @@ function TrendView({ stats }: { stats: StatsResult }) {
           按模型/提供商/Key/请求名/UA 切片，不需要给每个分组单独开趋势接口 */}
       <Panel
         title={t("trend.cost")}
-        note={`${t("trend.cost_note")} · ${formatCost(k.cost, k.currency)}`}
+        note={`${t("trend.cost_note")} · ${formatCosts(k.costCNY, k.costUSD)}`}
       >
-        <CostTrendChart data={stats.trend} currency={k.currency} />
+        <CostTrendChart data={stats.trend} />
       </Panel>
     </>
   )

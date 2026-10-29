@@ -268,6 +268,19 @@ func Cost(l models.ChatLog) float64 {
 		float64(l.CompletionTokens)*l.OutputPrice) / tokensPerMillion
 }
 
+// costOf 把一条日志的费用按行币种归桶。
+//
+// 聚合层不再把不同币种的金额加成一个数（量纲不成立），而是 CNY/USD 分列，
+// 由展示层各自呈现。空或未知币种归 CNY：与 init.go 把空币种回填成 CNY 的
+// 口径一致——历史上落过空币种的行，其价格是按 CNY 心智填的。
+func costOf(l models.ChatLog) (cny, usd float64) {
+	c := Cost(l)
+	if l.Currency == "USD" {
+		return 0, c
+	}
+	return c, 0
+}
+
 // ---------------------------------------------------------------------------
 // 筛选
 // ---------------------------------------------------------------------------
@@ -356,9 +369,12 @@ type KPI struct {
 	TotalTokens      int64   `json:"totalTokens"`
 	CachedTokens     int64   `json:"cachedTokens"`
 	CacheHitRate     float64 `json:"cacheHitRate"`
-	Cost             float64 `json:"cost"`
-	Currency         string  `json:"currency"`
-	TotalRetries     int64   `json:"totalRetries"`
+	// CostCNY / CostUSD 成本按行币种分列累加：把两种币的金额加成一个数
+	// 在量纲上不成立，混币部署的总成本必须分开读。空/未知币种归 CNY
+	//（见 costOf）。
+	CostCNY      float64 `json:"costCNY"`
+	CostUSD      float64 `json:"costUSD"`
+	TotalRetries int64   `json:"totalRetries"`
 	// AvgRetries 是"平均每请求重试次数"，**不是比率**。
 	//
 	// 原实现把它命名为 retryRate 并以百分比呈现，但 ChatLog.Retry 是
@@ -381,9 +397,9 @@ type TrendPoint struct {
 	// "非缓存输入 + 缓存读 + 输出"，若只有 prompt 就无法把缓存单独拆出，
 	// 而缓存命中正是本项目的观测重点（见 KPI 的 CacheHitRate）。
 	Cached int64 `json:"cached"`
-	// Cost 该桶的成本。口径同 KPI.Cost（见 Cost）：三档价 × 三类 token / 1e6，
-	// 价格取请求时快照。单位由 StatsResult.KPI.Currency 决定，桶内不带币种。
-	Cost            float64 `json:"cost"`
+	// CostCNY / CostUSD 该桶的成本，按行币种分列（口径见 KPI.CostCNY）。
+	CostCNY         float64 `json:"costCNY"`
+	CostUSD         float64 `json:"costUSD"`
 	AvgTps          float64 `json:"avgTps"`
 	AvgFirstChunkMs float64 `json:"avgFirstChunkMs"`
 }
@@ -414,7 +430,10 @@ type GroupStat struct {
 	P95FirstChunkMs float64 `json:"p95FirstChunkMs"`
 	AvgProxyMs      float64 `json:"avgProxyMs"`
 	Retries         int64   `json:"retries"`
-	Cost            float64 `json:"cost"`
+	// CostCNY / CostUSD 桶成本按行币种分列（口径见 KPI.CostCNY）：桶内
+	// 混币时两个数各自成立，不再是"加在一起、贴一个币种标签"。
+	CostCNY float64 `json:"costCNY"`
+	CostUSD float64 `json:"costUSD"`
 }
 
 // ErrorSample 是一条可点击的错误样本。
@@ -634,11 +653,9 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 		res.KPI.TotalTokens += l.TotalTokens
 		res.KPI.CachedTokens += l.PromptTokensDetails.CachedTokens
 		res.KPI.TotalRetries += int64(l.Retry)
-		res.KPI.Cost += Cost(l)
-		// 币种取首条非空值：单价是快照，同一批数据通常同一币种。
-		if res.KPI.Currency == "" && l.Currency != "" {
-			res.KPI.Currency = l.Currency
-		}
+		cny, usd := costOf(l)
+		res.KPI.CostCNY += cny
+		res.KPI.CostUSD += usd
 
 		// ---- 延迟样本 ----
 		fcMs := durationToMs(l.FirstChunkTime)
@@ -671,7 +688,9 @@ func aggregateWithBucketIter(f StatsFilter, bucket time.Duration, next statsLogI
 		p.Prompt += l.PromptTokens
 		p.Completion += l.CompletionTokens
 		p.Cached += l.PromptTokensDetails.CachedTokens
-		p.Cost += Cost(l)
+		// cny/usd 在本轮 KPI 累加处已声明，这里是同一个循环里的趋势桶
+		p.CostCNY += cny
+		p.CostUSD += usd
 		p.AvgTps += l.Tps
 		p.AvgFirstChunkMs += fcMs
 
@@ -995,7 +1014,9 @@ func (a *groupAcc) count(it *groupItem, l models.ChatLog) {
 	s.TotalTokens += l.TotalTokens
 	s.Cached += l.PromptTokensDetails.CachedTokens
 	s.Retries += int64(l.Retry)
-	s.Cost += Cost(l)
+	cny, usd := costOf(l)
+	s.CostCNY += cny
+	s.CostUSD += usd
 	if l.Tps > s.MaxTps {
 		s.MaxTps = l.Tps
 	}
@@ -1346,7 +1367,8 @@ func mergeGroupStats(a, b GroupStat) GroupStat {
 	a.TotalTokens += b.TotalTokens
 	a.Cached += b.Cached
 	a.Retries += b.Retries
-	a.Cost += b.Cost
+	a.CostCNY += b.CostCNY
+	a.CostUSD += b.CostUSD
 
 	a.SuccessRate = ratio(a.Success, a.Success+a.Error) * 100
 	a.CacheHitRate = ratio(a.Cached, a.Prompt) * 100

@@ -42,7 +42,9 @@
     "running": "在途",
     "input": "非快取輸入",
     "cached": "快取讀取",
-    "output": "輸出"
+    "output": "輸出",
+    "cost_cny": "成本 (¥)",
+    "cost_usd": "成本 ($)"
   },
   "latency": {
     "title": "首包耗時分佈",

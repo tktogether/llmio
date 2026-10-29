@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atopos31/llmio/balancers"
 	"github.com/atopos31/llmio/common"
 	"github.com/atopos31/llmio/consts"
 	"github.com/atopos31/llmio/models"
@@ -782,6 +783,9 @@ func DeleteModelProvider(c *gin.Context) {
 		common.NotFound(c, "Model-provider association not found")
 		return
 	}
+
+	// 熔断状态随关联行走：见 balancers.Forget 的注释。
+	balancers.Forget(uint(id))
 
 	common.Success(c, nil)
 }

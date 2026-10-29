@@ -13,15 +13,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { useAutoRefresh } from "@/hooks/use-auto-refresh"
 import { getStats, type StatsResult } from "@/lib/api"
 import { statsRowNames } from "@/lib/analytics"
-import {
-  compactNumber,
-  formatClockSeconds,
-  formatCost,
-  formatDateTime,
-  formatNumber,
-  formatPercent,
-  formatSeconds,
-} from "@/lib/format"
+import { compactNumber, formatClockSeconds, formatCosts, formatDateTime, formatNumber, formatPercent, formatSeconds } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import {
   HOME_RANGES,
@@ -262,7 +254,7 @@ export default function Home() {
                 title={t("home:trend.cost")}
                 note={t("home:kpi.cost_hint")}
               >
-                <CostTrendChart data={stats!.trend} currency={stats!.kpi.currency} />
+                <CostTrendChart data={stats!.trend} />
               </Panel>
             </div>
 
@@ -379,7 +371,7 @@ function KpiRow({ stats }: { stats: StatsResult }) {
     { label: t("kpi.first_chunk_p50"), value: formatSeconds(stats.latency.firstChunk.p50) },
     {
       label: t("kpi.cost"),
-      value: formatCost(k.cost, k.currency),
+      value: formatCosts(k.costCNY, k.costUSD),
       hint: t("kpi.cost_hint"),
     },
   ]

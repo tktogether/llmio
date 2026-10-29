@@ -55,7 +55,8 @@ function group(name: string, over: Partial<GroupStat> = {}): GroupStat {
     p95FirstChunkMs: 3000,
     avgProxyMs: 1500,
     retries: 2,
-    cost: 0.12,
+    costCNY: 0,
+    costUSD: 0.12,
     ...over,
   }
 }
@@ -78,14 +79,14 @@ function fixture(over: Partial<StatsResult> = {}): StatsResult {
       totalTokens: 1500,
       cachedTokens: 250,
       cacheHitRate: 25,
-      cost: 0.12,
-      currency: "USD",
+      costCNY: 0,
+      costUSD: 0.12,
       totalRetries: 2,
       avgRetries: 0.2,
     },
     trend: [
-      { ts: 1_759_980_000_000, total: 6, success: 6, error: 0, running: 0, tokens: 900, prompt: 600, completion: 300, cached: 150, cost: 0.08, avgTps: 40, avgFirstChunkMs: 1200 },
-      { ts: 1_759_981_800_000, total: 4, success: 3, error: 1, running: 0, tokens: 600, prompt: 400, completion: 200, cached: 100, cost: 0.04, avgTps: 40, avgFirstChunkMs: 1200 },
+      { ts: 1_759_980_000_000, total: 6, success: 6, error: 0, running: 0, tokens: 900, prompt: 600, completion: 300, cached: 150, costCNY: 0.08, costUSD: 0, avgTps: 40, avgFirstChunkMs: 1200 },
+      { ts: 1_759_981_800_000, total: 4, success: 3, error: 1, running: 0, tokens: 600, prompt: 400, completion: 200, cached: 100, costCNY: 0.04, costUSD: 0, avgTps: 40, avgFirstChunkMs: 1200 },
     ],
     byModel: [group("gpt-test")],
     // 联合维度默认留空：它的形状与 byModel 不同（行名是「请求名 · 提供商」），
@@ -107,8 +108,8 @@ function fixture(over: Partial<StatsResult> = {}): StatsResult {
       },
     ],
     errorTrend: [
-      { ts: 1_759_980_000_000, total: 0, success: 0, error: 0, running: 0, tokens: 0, prompt: 0, completion: 0, cached: 0, cost: 0, avgTps: 0, avgFirstChunkMs: 0 },
-      { ts: 1_759_981_800_000, total: 1, success: 0, error: 1, running: 0, tokens: 0, prompt: 0, completion: 0, cached: 0, cost: 0, avgTps: 0, avgFirstChunkMs: 0 },
+      { ts: 1_759_980_000_000, total: 0, success: 0, error: 0, running: 0, tokens: 0, prompt: 0, completion: 0, cached: 0, costCNY: 0, costUSD: 0, avgTps: 0, avgFirstChunkMs: 0 },
+      { ts: 1_759_981_800_000, total: 1, success: 0, error: 1, running: 0, tokens: 0, prompt: 0, completion: 0, cached: 0, costCNY: 0, costUSD: 0, avgTps: 0, avgFirstChunkMs: 0 },
     ],
     latency: {
       firstChunk: { p50: 1, p90: 2, p95: 3, p99: 4, avg: 1.5, max: 5, list: [1, 1.2, 2, 3, 5] },
@@ -347,7 +348,8 @@ describe("分析页 · 模型性能", () => {
           avgFirstChunkMs: 800,
           p95FirstChunkMs: 1500,
           retries: 0,
-          cost: 0.5,
+          costCNY: 0,
+          costUSD: 0.5,
           totalTokens: 2000,
         }),
         group("slow", {
@@ -358,7 +360,7 @@ describe("分析页 · 模型性能", () => {
           avgFirstChunkMs: 4000,
           p95FirstChunkMs: 6000,
           retries: 3,
-          cost: 0.25,
+          costCNY: 0.25,
           totalTokens: 1000,
         }),
         group("nosample", {
@@ -369,7 +371,7 @@ describe("分析页 · 模型性能", () => {
           avgFirstChunkMs: 0,
           p95FirstChunkMs: 0,
           retries: 0,
-          cost: 0,
+          costCNY: 0,
           totalTokens: 0,
         }),
       ],
@@ -451,9 +453,9 @@ describe("分析页 · 在同一请求名的各家提供商之间比", () => {
       byModel: [group("alpha", { total: 8 }), group("beta", { total: 4 })],
       byProvider: [group("fast-up", { total: 7 }), group("slow-up", { total: 5 })],
       byModelProvider: [
-        j("alpha", "slow-up", { total: 5, avgTps: 8, cost: 1.25 }),
-        j("alpha", "fast-up", { total: 3, avgTps: 60, cost: 0.5 }),
-        j("beta", "fast-up", { total: 4, avgTps: 30, cost: 0.75 }),
+        j("alpha", "slow-up", { total: 5, avgTps: 8, costCNY: 1.25 }),
+        j("alpha", "fast-up", { total: 3, avgTps: 60, costUSD: 0.5 }),
+        j("beta", "fast-up", { total: 4, avgTps: 30, costCNY: 0.75 }),
       ],
     })
   }
@@ -551,9 +553,9 @@ describe("分析页 · 提供商×模型联合用量", () => {
     mocked.getStats.mockResolvedValue(
       fixture({
         byProviderModel: [
-          pm("gpt-4o", "prov-a", { total: 6, cost: 1.2 }),
-          pm("gpt-4o", "prov-b", { total: 2, cost: 0.4 }),
-          pm("claude-sonnet", "prov-a", { total: 4, cost: 0.8 }),
+          pm("gpt-4o", "prov-a", { total: 6, costCNY: 1.2 }),
+          pm("gpt-4o", "prov-b", { total: 2, costCNY: 0.4 }),
+          pm("claude-sonnet", "prov-a", { total: 4, costCNY: 0.8 }),
         ],
       })
     )

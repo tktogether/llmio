@@ -152,6 +152,8 @@ func main() {
 		api.GET("/models", handler.GetModels)
 		api.GET("/models/select", handler.GetModelList)
 		api.POST("/models", handler.CreateModel)
+		// 从供应商导入的第一步：批量建逻辑模型（幂等，同名跳过）
+		api.POST("/models/batch", handler.BatchCreateModels)
 		api.PATCH("/models/order", handler.UpdateModelOrder)
 		api.PUT("/models/:id", handler.UpdateModel)
 		api.DELETE("/models/:id", handler.DeleteModel)
@@ -162,6 +164,13 @@ func main() {
 		// 只读建议端点：自动填写用，不参与写入路径（见 handler.GetModelProviderMetadata）
 		api.GET("/model-providers/metadata", handler.GetModelProviderMetadata)
 		api.POST("/model-providers", handler.CreateModelProvider)
+		// 批量族：创建（body 带 dry_run 可做零写入预览）/ 启停 / 删除。
+		// DELETE 走 POST 子路径，规避部分反代剥 DELETE body 的坑。
+		api.POST("/model-providers/batch", handler.BatchCreateModelProviders)
+		api.POST("/model-providers/batch/status", handler.BatchUpdateModelProviderStatus)
+		api.POST("/model-providers/batch/delete", handler.BatchDeleteModelProviders)
+		// 元数据补填：对已存在关联补空位（autofill 冷启动后的事后出口）
+		api.POST("/model-providers/batch/backfill", handler.BatchBackfillMetadata)
 		api.PUT("/model-providers/:id", handler.UpdateModelProvider)
 		api.PATCH("/model-providers/:id/status", handler.UpdateModelProviderStatus)
 		api.DELETE("/model-providers/:id", handler.DeleteModelProvider)

@@ -598,9 +598,9 @@ func TestAggregateKPI(t *testing.T) {
 	if res.KPI.TotalRetries != 3 {
 		t.Fatalf("TotalRetries want 3, got %d", res.KPI.TotalRetries)
 	}
-	// 币种取首条非空值（首条为空则顺延到第二条）
-	if res.KPI.Currency != "CNY" {
-		t.Fatalf("Currency want CNY, got %q", res.KPI.Currency)
+	// 成本按行币种归桶：该用例日志币种为 CNY/空，USD 桶必须为空
+	if res.KPI.CostUSD != 0 {
+		t.Fatalf("CostUSD = %v，无 USD 行时应为 0", res.KPI.CostUSD)
 	}
 }
 
@@ -708,9 +708,9 @@ func TestAggregateTrendBuckets(t *testing.T) {
 	if res.Trend[1].Total != 0 || res.Trend[1].Tokens != 0 {
 		t.Fatalf("中间桶应为空：%+v", res.Trend[1])
 	}
-	// 空桶以零值构造，Cost 同样应为 0
-	if res.Trend[1].Cost != 0 {
-		t.Fatalf("空桶 Cost 应为 0，实得 %v", res.Trend[1].Cost)
+	// 空桶以零值构造，两币成本同样应为 0
+	if res.Trend[1].CostCNY != 0 || res.Trend[1].CostUSD != 0 {
+		t.Fatalf("空桶成本应为 0，实得 %v/%v", res.Trend[1].CostCNY, res.Trend[1].CostUSD)
 	}
 
 	// 末桶
@@ -739,12 +739,15 @@ func TestAggregateTrendCostPinnedByThreeTierPricing(t *testing.T) {
 		t.Fatalf("应只有 1 个桶，实得 %d", len(res.Trend))
 	}
 	want := (600*3 + 400*0.3 + 200*15) / 1e6 // = 0.00522
-	if diff := res.Trend[0].Cost - want; diff > 1e-12 || diff < -1e-12 {
-		t.Fatalf("桶 Cost 应为 %v（三档计价），实得 %v", want, res.Trend[0].Cost)
+	if diff := res.Trend[0].CostCNY - want; diff > 1e-12 || diff < -1e-12 {
+		t.Fatalf("桶 CostCNY 应为 %v（三档计价），实得 %v", want, res.Trend[0].CostCNY)
+	}
+	if res.Trend[0].CostUSD != 0 {
+		t.Fatalf("该行币种非 USD，CostUSD 应为 0，实得 %v", res.Trend[0].CostUSD)
 	}
 	// 币种在 KPI 层，桶内不带
-	if res.KPI.Currency != "CNY" {
-		t.Fatalf("KPI.Currency 应为 CNY，实得 %q", res.KPI.Currency)
+	if res.KPI.CostUSD != 0 {
+		t.Fatalf("KPI.CostUSD = %v，无 USD 行时应为 0", res.KPI.CostUSD)
 	}
 }
 
@@ -2174,13 +2177,13 @@ func TestResolveKeyGroupsMergesSameName(t *testing.T) {
 		{
 			Name:  strconv.FormatUint(uint64(a.ID), 10),
 			Total: 3, Success: 2, Error: 1, Prompt: 100, Completion: 10,
-			TotalTokens: 110, Cached: 40, Retries: 1, Cost: 1.5,
+			TotalTokens: 110, Cached: 40, Retries: 1, CostCNY: 1.0, CostUSD: 0.5,
 			AvgTps: 10, AvgFirstChunkMs: 100, AvgProxyMs: 200, MaxTps: 30, P95FirstChunkMs: 300,
 		},
 		{
 			Name:  strconv.FormatUint(uint64(b.ID), 10),
 			Total: 5, Success: 4, Error: 1, Prompt: 300, Completion: 30,
-			TotalTokens: 330, Cached: 60, Retries: 2, Cost: 2.5,
+			TotalTokens: 330, Cached: 60, Retries: 2, CostCNY: 2.0, CostUSD: 0.5,
 			AvgTps: 20, AvgFirstChunkMs: 200, AvgProxyMs: 400, MaxTps: 50, P95FirstChunkMs: 250,
 		},
 	}}
@@ -2203,8 +2206,11 @@ func TestResolveKeyGroupsMergesSameName(t *testing.T) {
 	if g.Retries != 3 {
 		t.Fatalf("重试未相加：%d", g.Retries)
 	}
-	if diff := g.Cost - 4.0; diff > 1e-9 || diff < -1e-9 {
-		t.Fatalf("成本未相加：%v", g.Cost)
+	if diff := g.CostCNY - 3.0; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("CNY 成本未相加：%v", g.CostCNY)
+	}
+	if diff := g.CostUSD - 1.0; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("USD 成本未相加：%v", g.CostUSD)
 	}
 	// 比率必须从合并后的计数重算，不能对两个比率取平均
 	// 成功率 = 6/(6+2) = 75%
@@ -2309,5 +2315,69 @@ func TestMergeGroupStatsTakesLargerMaxima(t *testing.T) {
 	}
 	if got.P95FirstChunkMs != 999 {
 		t.Fatalf("P95 应取上界 999，实得 %v", got.P95FirstChunkMs)
+	}
+}
+
+// TestAggregateMixedCurrencySplit 钉死双币口径：CNY 行与 USD 行的金额
+// 各落各桶，绝不相加成一个数——"混币总和"在量纲上不成立。
+func TestAggregateMixedCurrencySplit(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 10, 25, 10, 0, 0, 0, time.UTC)
+	cnyRow := logAt(1, base, consts.StatusSuccess)
+	cnyRow.Name = "mix"
+	cnyRow.ProviderModel = "m-a"
+	cnyRow.PromptTokens = 1_000_000 // 整百万，免去除法噪声
+	cnyRow.InputPrice = 2
+	cnyRow.Currency = "CNY"
+
+	usdRow := logAt(2, base.Add(time.Minute), consts.StatusSuccess)
+	usdRow.Name = "mix"
+	usdRow.ProviderModel = "m-b"
+	usdRow.PromptTokens = 1_000_000
+	usdRow.InputPrice = 3
+	usdRow.Currency = "USD"
+
+	legacyRow := logAt(3, base.Add(2*time.Minute), consts.StatusSuccess)
+	legacyRow.Name = "mix"
+	legacyRow.ProviderModel = "m-a"
+	legacyRow.PromptTokens = 1_000_000
+	legacyRow.InputPrice = 1
+	legacyRow.Currency = "" // 老行：空币种，按 init 回填口径归 CNY
+
+	res := AggregateWithBucket([]models.ChatLog{cnyRow, usdRow, legacyRow}, StatsFilter{}, time.Hour)
+
+	// KPI：2 + 1 = 3 落 CNY，3 落 USD，绝不能出现 6 这种混币总和
+	if diff := res.KPI.CostCNY - 3.0; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("CostCNY = %v，期望 3（2 + 空币种老行 1）", res.KPI.CostCNY)
+	}
+	if diff := res.KPI.CostUSD - 3.0; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("CostUSD = %v，期望 3", res.KPI.CostUSD)
+	}
+
+	// 趋势桶同口径
+	if diff := res.Trend[0].CostCNY - 3.0; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("趋势桶 CostCNY = %v，期望 3", res.Trend[0].CostCNY)
+	}
+	if diff := res.Trend[0].CostUSD - 3.0; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("趋势桶 CostUSD = %v，期望 3", res.Trend[0].CostUSD)
+	}
+
+	// 分组：m-a 桶（两行 CNY）与 m-b 桶（一行 USD）各自成立
+	byModel := map[string]GroupStat{}
+	for _, g := range res.ByModel {
+		byModel[g.Name] = g
+	}
+	if diff := byModel["m-a"].CostCNY - 3.0; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("m-a 桶 CostCNY = %v，期望 3", byModel["m-a"].CostCNY)
+	}
+	if byModel["m-a"].CostUSD != 0 {
+		t.Fatalf("m-a 桶不应有 USD 金额：%v", byModel["m-a"].CostUSD)
+	}
+	if diff := byModel["m-b"].CostUSD - 3.0; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("m-b 桶 CostUSD = %v，期望 3", byModel["m-b"].CostUSD)
+	}
+	if byModel["m-b"].CostCNY != 0 {
+		t.Fatalf("m-b 桶不应有 CNY 金额：%v", byModel["m-b"].CostCNY)
 	}
 }
