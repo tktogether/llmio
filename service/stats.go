@@ -171,6 +171,10 @@ type textRule struct {
 // 错误文本里可能同时带着 "All retry failed" 外壳，但根因是对端先跑了——
 // 归成"重试耗尽"会让人误以为上游有问题。
 var textRules = []textRule{
+	// 「等响应头超时」必须排在通用「超时」之前：它的处置与普通超时完全不同
+	// （调 TimeOut 还是查连接，见 service/upstream_diag.go 的文件头），混在一个桶里
+	// 就等于没分类。HTTP/1.1 与 HTTP/2 的文案只差一个前缀，共用一条规则。
+	{class: ErrorClass{Type: "响应头超时", Code: "header-timeout"}, patterns: []string{"timeout awaiting response headers"}},
 	{class: ErrorClass{Type: "超时", Code: "timeout"}, patterns: []string{"context deadline exceeded", "deadline exceeded", "timeout", "timed out"}},
 	{class: ErrorClass{Type: "客户端断开", Code: "client-cancel"}, patterns: []string{"context canceled", "context cancelled", "canceled by client"}},
 	{class: ErrorClass{Type: "上游业务错误", Code: "upstream-body"}, patterns: []string{"matched provider error sample"}},
