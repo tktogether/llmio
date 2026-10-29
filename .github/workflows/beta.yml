@@ -77,25 +77,3 @@ jobs:
             VERSION=${{ steps.stamp.outputs.pinned }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  deploy-beta:
-    needs: build-push-beta
-    # 只有 beta 分支的构建上线；从别的分支手动派发只出镜像，不动 Sealos
-    if: github.ref == 'refs/heads/beta'
-    runs-on: ubuntu-latest
-    steps:
-      # 需要仓库 secret KUBE_CONFIG：kubeconfig 的 base64（单行）
-      # 目标工作负载只有一个容器，set image 的 <容器名>= 按实际值写；改成别的名字只动这一处
-      - name: Set image to this build
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: -n ${{ env.DEPLOY_NAMESPACE }} set image ${{ env.DEPLOY_WORKLOAD }} llmio=docker.io/${{ env.IMAGE_NAME }}:${{ needs.build-push-beta.outputs.pinned }}
-
-      - name: Wait for rollout
-        uses: actions-hub/kubectl@master
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        with:
-          args: -n ${{ env.DEPLOY_NAMESPACE }} rollout status ${{ env.DEPLOY_WORKLOAD }} --timeout=300s
