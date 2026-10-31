@@ -123,6 +123,11 @@ function provider(over: Partial<Provider> = {}): Provider {
     ForwardSlug: null,
     ForwardRewrite: "known",
     ForwardTargetModel: "",
+    RequestGzipEnabled: false,
+    RequestGzipSupported: null,
+    RequestGzipProbedAt: null,
+    RequestGzipProbeDetail: "",
+    RequestGzipProbeHash: "",
     ...over,
   }
 }
