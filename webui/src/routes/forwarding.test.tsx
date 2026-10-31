@@ -51,6 +51,11 @@ function provider(over: Partial<Provider> = {}): Provider {
     ForwardSlug: "gw-a",
     ForwardRewrite: "known",
     ForwardTargetModel: "",
+    RequestGzipEnabled: false,
+    RequestGzipSupported: null,
+    RequestGzipProbedAt: null,
+    RequestGzipProbeDetail: "",
+    RequestGzipProbeHash: "",
     ...over,
   }
 }
